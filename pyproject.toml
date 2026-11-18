@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "arena-agent"
-version = "0.2.1"
+version = "0.2.2"
 description = "Rockwell Arena 14/16 离散事件仿真建模、批跑、验收和导图工具"
 readme = "README.md"
 license = "MIT"
@@ -21,7 +21,7 @@ classifiers = [
 dependencies = [
     "pywin32>=306; sys_platform == 'win32'",
     "mcp>=2.0,<3",
-    "pillow>=10",
+    "pillow>=11.2.1",
 ]
 
 [project.optional-dependencies]

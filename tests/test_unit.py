@@ -3,6 +3,7 @@ import json
 import math
 import os
 from shutil import copyfile
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -203,6 +204,51 @@ def test_read_db_matches_out_summary():
     assert res["Doctor.Instantaneous Utilization"]["kind"] == "time-persistent"
 
 
+@pytest.mark.parametrize("with_run_index", [False, True])
+def test_sqlite_uses_one_run_across_statistic_views(tmp_path, with_run_index):
+    db = tmp_path / "history.db"
+    with sqlite3.connect(db) as con:
+        con.execute('CREATE TABLE OutputStatsQuery ([Project RunDateTime], Replication, Name, Type, Source, RecordedValue)')
+        con.execute('CREATE TABLE CounterStatsQuery ([Project RunDateTime], Replication, Name, Type, Source, RecordedValue)')
+        con.executemany(
+            'INSERT INTO OutputStatsQuery VALUES (?,?,?,?,?,?)',
+            [('first', 1, 'Transit', 'Output', 'User', 5), ('second', 1, 'Transit', 'Output', 'User', 9)],
+        )
+        con.execute("INSERT INTO CounterStatsQuery VALUES ('first',1,'Old counter','Count','User',99)")
+        if with_run_index:
+            con.execute('CREATE TABLE RunOutput (OutputCreationDate)')
+            con.execute("INSERT INTO RunOutput VALUES ('first'), ('second')")
+    con.close()
+    res = results.read_db(db, per_replication=True)
+    assert set(res) == {'Transit'}
+    assert res['Transit']['replications'] == [9]
+    if with_run_index:
+        with sqlite3.connect(db) as con:
+            con.execute("INSERT INTO RunOutput VALUES ('third')")
+        con.close()
+        assert results.read_db(db) == {}
+
+
+def test_sqlite_wal_report_is_current_without_a_checkpoint(tmp_path):
+    model = tmp_path / "live.doe"
+    db = model.with_suffix(".db")
+    writer = sqlite3.connect(db)
+    try:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute('CREATE TABLE OutputStatsQuery ([Project RunDateTime], Replication, Name, Type, Source, RecordedValue)')
+        writer.execute("INSERT INTO OutputStatsQuery VALUES ('current',1,'Throughput','Output','User',42)")
+        writer.commit()
+        wal = db.with_name(db.name + "-wal")
+        os.utime(db, (1000, 1000))
+        os.utime(wal, (1100, 1100))
+        report = results.read(model, since=1050, per_replication=True)
+        assert report["source"] == str(db)
+        assert report["statistics"]["Throughput"]["replications"] == [42]
+    finally:
+        writer.close()
+
+
 def test_drop_empty():
     res = results.read_db(os.path.join(DATA, "clinic.db"))
     kept = results.drop_empty(res)
@@ -312,3 +358,23 @@ def test_screenshot_retries_misplaced_arena14_viewport(monkeypatch, second_zoom_
         with pytest.raises(core.ArenaError, match="could not display screenshot tile"):
             snapshot._zoom_for_tile(view, region, needed)
     assert view.calls == 2
+
+
+def test_screenshot_uses_only_the_arena_pane_and_crops_its_border(monkeypatch):
+    pytest.importorskip("win32gui")
+    from arena_agent import snapshot
+    from PIL import Image
+
+    captured = Image.new("RGB", (34, 24), "black")
+    captured.paste("white", (2, 2, 32, 22))
+    handles = []
+
+    def grab(*, window):
+        handles.append(window)
+        return captured
+
+    monkeypatch.setattr(snapshot.ImageGrab, "grab", grab)
+    monkeypatch.setattr(snapshot.win32gui, "GetWindowRect", lambda pane: (100, 200, 134, 224))
+    rendered = snapshot._capture_pane(17, (102, 202, 132, 222))
+    assert handles == [17]
+    assert rendered.size == (30, 20) and rendered.getextrema() == ((255, 255),) * 3

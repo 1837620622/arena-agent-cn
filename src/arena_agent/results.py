@@ -47,20 +47,42 @@ def read_db(path, per_replication=False):
     from the report database at path. Only the latest run in the database is used."""
     con = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
     try:
-        res = {}
+        # 四类统计共用一次读事务和运行时间，避免读到另外一轮的旧数据。
+        con.execute("BEGIN")
+        try:
+            latest = con.execute("SELECT MAX(OutputCreationDate) FROM RunOutput").fetchone()[0]
+        except sqlite3.OperationalError as exc:
+            if not str(exc).startswith(("no such table:", "no such column:")):
+                raise
+            latest = None
+
+        reports = []
         for view, col, k in VIEWS:
+            query = (f'SELECT [Project RunDateTime], Replication, Name, Type, Source, [{col}] '
+                     f'FROM [{view}] WHERE [Project RunDateTime] = ')
             try:
-                rows = con.execute(f'SELECT [Project RunDateTime], Replication, Name, Type, Source, [{col}] '
-                                   f'FROM {view}').fetchall()
-            except sqlite3.Error:
+                if latest is None:
+                    rows = con.execute(query + f'(SELECT MAX([Project RunDateTime]) FROM [{view}])').fetchall()
+                else:
+                    rows = con.execute(query + '?', (latest,)).fetchall()
+            except sqlite3.OperationalError as exc:
+                if not str(exc).startswith(("no such table:", "no such column:")):
+                    raise
                 continue
-            if not rows:
+            if rows:
+                reports.append((rows[0][0], k, rows))
+
+        if not reports:
+            return {}
+        if latest is None:
+            latest = max(when for when, _, _ in reports)
+
+        res = {}
+        for when, k, rows in reports:
+            if when != latest:
                 continue
-            latest = max(r[0] for r in rows)
             by = {}
-            for when, rep, name, typ, src, val in rows:
-                if when != latest:
-                    continue
+            for _, rep, name, typ, src, val in rows:
                 key = name if k in ("output", "counter") else f"{name}.{typ}"  # outputs/counters have unique names
                 by.setdefault((key, src), {})[rep] = val
             for (key, src), reps in by.items():
@@ -87,6 +109,12 @@ def read(model_path, since=0, per_replication=False, include_empty=False, *, tex
             modified = os.stat(path).st_mtime
         except FileNotFoundError:
             continue
+        if suffix == ".db":
+            # SQLite 可能先把最新事务写进 WAL，主数据库要到 checkpoint 才更新。
+            try:
+                modified = max(modified, os.stat(path + "-wal").st_mtime)
+            except FileNotFoundError:
+                pass
         if modified >= since:
             candidates.append((suffix, path, modified))
     if not since:

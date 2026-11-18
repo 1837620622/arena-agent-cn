@@ -55,7 +55,8 @@ Background and evidence for each: `arena_guide("discoveries")`.
     starts a fresh Arena. arena-agent reconnects on its own.
 19. **Two edits must never run into the same model at once.** The MCP server serialises calls; do not also run CLI
     builds on the same file from a background shell at the same time.
-20. **Screenshots read the screen.** Anything covering Arena's window spoils `screenshot_model`.
+20. **Screenshots capture the Arena drawing pane.** Open Arena in a Windows desktop session. The exporter captures
+    the native drawing window so taskbar, cursor overlays and other desktop panels do not enter the tiled image.
     For readable details, set `region` to the section bounds and raise `pixels_per_unit` until the labels are legible.
     Leave a margin around the outer modules and their connectors. Inspect tiled images at 100% for broken lines at
     the joins and for labels that Arena wraps against a module border. Shorten a crowded label if its full text

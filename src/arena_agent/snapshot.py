@@ -2,14 +2,13 @@
 
 The flowchart pane is zoomed tile by tile with IView.ZoomRegion; after each zoom the visible world extents are read
 back (IView.Left/Top/Right/Bottom), so every tile is pasted at its exact place whatever zoom Arena actually chose.
-Arena must be visible on screen and not covered by other windows: the tiles are grabbed from the screen.
+Each tile is captured directly from the Arena flowchart window.
 """
 import ctypes
 import math
 import os
 import time
 
-import win32api
 import win32con
 import win32gui
 from PIL import Image, ImageGrab
@@ -81,6 +80,18 @@ def _zoom_for_tile(view, requested, needed):
     raise ArenaError(f"Arena could not display screenshot tile {needed}; reduce the zoom or select a smaller region")
 
 
+def _capture_pane(pane, client):
+    img = ImageGrab.grab(window=pane)
+    x0, y0, x1, y1 = client
+    if img.size == (x1 - x0, y1 - y0):
+        return img
+    # 某些窗口会连同滚动条和边框一起返回，按客户区实际边界裁切。
+    left, top, right, bottom = win32gui.GetWindowRect(pane)
+    if img.size == (right - left, bottom - top) and left <= x0 < x1 <= right and top <= y0 < y1 <= bottom:
+        return img.crop((x0 - left, y0 - top, x1 - left, y1 - top))
+    raise ArenaError("the Arena flowchart window changed size during capture; retry the export")
+
+
 def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64, *, view_name=None):
     """Write a PNG of the flowchart by named view or rectangle (default: all flowchart modules).
     ppu: screen pixels per model unit; default fits the region into one screen (readable for small models)."""
@@ -117,7 +128,6 @@ def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64, *, view_na
     win32gui.ShowWindow(top, win32con.SW_MAXIMIZE)
     win32gui.ShowWindow(child, win32con.SW_MAXIMIZE)
     safe(lambda: win32gui.SetForegroundWindow(top))
-    safe(lambda: win32api.SetCursorPos((5, 5)))
     time.sleep(0.8)
     pr = client_rect(pane)
     pw, ph = pr[2] - pr[0], pr[3] - pr[1]
@@ -143,7 +153,7 @@ def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64, *, view_na
                 py, bottom_px = round((top - Y0) * ppu), round((bottom - Y0) * ppu)
             else:
                 py, bottom_px = round((Y1 - top) * ppu), round((Y1 - bottom) * ppu)
-            img = ImageGrab.grab(bbox=pr, all_screens=True)
+            img = _capture_pane(pane, pr)
             size = (max(1, right_px - px), max(1, bottom_px - py))
             if size != img.size:
                 img = img.resize(size, Image.Resampling.BICUBIC)
@@ -152,4 +162,4 @@ def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64, *, view_na
     canvas.save(out_path)
     return {"out": out_path, "size": [W, H], "tiles": nx * ny, "region": [X0, Y0, X1, Y1],
             **({"view_name": view_name} if view_name is not None else {}),
-            "note": "grabbed from the screen: if it shows another window, bring Arena to the front and retry"}
+            "capture": "arena_flowchart_window"}
