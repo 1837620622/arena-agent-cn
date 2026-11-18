@@ -338,6 +338,8 @@ def dispatch(cmd, args, pos):
         return 1
     if isinstance(res, dict) and res.get("ok") is False:  # a failed check, build or run: not a successful command
         return 1
+    if cmd == "scenarios" and any(case.get("ok") is False for case in res.get("scenarios", [])):
+        return 1
     return 0
 
 

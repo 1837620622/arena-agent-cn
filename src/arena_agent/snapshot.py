@@ -14,7 +14,7 @@ import win32con
 import win32gui
 from PIL import Image, ImageGrab
 
-from .core import (ARENA_14, ArenaError, com_major_version, end_other_runs, named_view_regions, open_model, safe,
+from .core import (ARENA_14, ArenaError, com_major_version, named_view_regions, open_model, safe,
                    temporary_settings)
 
 VIEW_SETTINGS = {"SplitScreen": True, "SplitScreenPercent": 99, "Grid": False, "ShowRulers": False,
@@ -317,10 +317,10 @@ def _capture_run_frame(view, pane, region, ppu):
         raise ArenaError("the screenshot region is outside the current paused view; show the whole region in Arena first")
     scale_x, scale_y = width / (x_hi - x_lo), height / (y_hi - y_lo)
     # 视野左右或上下颠倒时，屏幕坐标从大值往小值走，裁剪框要按同一方向换算。
-    col0, col1 = (x0, x1) if left <= right else (x_hi - x1, x_hi - x0)
-    row0, row1 = (y0, y1) if top <= bottom else (y_hi - y1, y_hi - y0)
-    box = (max(0, round((col0 - x_lo) * scale_x)), max(0, round((row0 - y_lo) * scale_y)),
-           min(width, round((col1 - x_lo) * scale_x)), min(height, round((row1 - y_lo) * scale_y)))
+    col0, col1 = (x0 - x_lo, x1 - x_lo) if left <= right else (x_hi - x1, x_hi - x0)
+    row0, row1 = (y0 - y_lo, y1 - y_lo) if top <= bottom else (y_hi - y1, y_hi - y0)
+    box = (max(0, round(col0 * scale_x)), max(0, round(row0 * scale_y)),
+           min(width, round(col1 * scale_x)), min(height, round(row1 * scale_y)))
     if box[2] <= box[0] or box[3] <= box[1]:
         raise ArenaError("the screenshot region is smaller than one screen pixel")
     image = _upright(_capture_pane(pane, client).crop(box), bounds)
@@ -395,7 +395,6 @@ def capture_animation_frame(a, model, out_path, view_name, simulation_time, *, s
         raise ArenaError("animation frame output must end in .png")
     if com_major_version(a.Version) != ARENA_14:
         raise ArenaError("automated animation playback currently supports Arena 14")
-    ended_first = end_other_runs(a)  # a model left in run mode blocks playback, and every frame of a series runs
     if any(safe(lambda: a.Models.Item(i).State, 0) for i in range(1, a.Models.Count + 1)):
         raise ArenaError("an Arena run is still active; end it in Arena before starting animation playback")
 
@@ -438,8 +437,7 @@ def capture_animation_frame(a, model, out_path, view_name, simulation_time, *, s
                 raise ArenaError(f"Arena stopped at simulation time {current_time} (state {state}), "
                                  f"expected {simulation_time:g}; check the model or increase the timeout")
             result = snapshot(a, model, out_path, view_name=view_name)
-            return {**result, "simulation_time": current_time,
-                    **({"ended_first": ended_first} if ended_first else {})}
+            return {**result, "simulation_time": current_time}
         finally:
             if safe(lambda: m.State, 0):
                 safe(lambda: m.End())

@@ -546,9 +546,9 @@ def layout_options(spec, notes=None):
         dx, dy = float(opts["dx"]), float(opts["dy"])
         ox, oy = (float(v) for v in opts["origin"])
         columns = max(1, int(opts["columns"]))
-        if not (dx > 0 and dy > 0 and math.isfinite(dx) and math.isfinite(dy)):
-            raise ValueError("spacing must be positive")
-    except (TypeError, ValueError):
+        if dx <= 0 or dy <= 0 or not all(math.isfinite(v) for v in (dx, dy, ox, oy)):
+            raise ValueError("spacing and origin must be finite")
+    except (TypeError, ValueError, OverflowError):
         if notes is not None:
             notes.append("layout: dx, dy must be positive numbers, columns a whole number and origin two numbers; "
                          "the default 2600 x 1800, 12 columns was used")
@@ -580,16 +580,19 @@ def plan_layout(spec, notes=None, skip=()):
     columns = {}
     for k in keys:
         columns.setdefault(rank[k], []).append(k)
-    pos, band_top = {}, oy
+    pos, band_top, previous_half = {}, oy, 0
     order = sorted(columns)
     for start in range(0, len(order), columns_per_band):
         band = order[start:start + columns_per_band]
         tallest = max(len(columns[col]) for col in band)
+        half = (tallest - 1) * dy / 2
+        if start:
+            band_top += previous_half + half + 2 * dy
         for i, col in enumerate(band):
             members = columns[col]
             for j, k in enumerate(members):
                 pos[k] = (ox + i * dx, band_top + (j - (len(members) - 1) / 2) * dy)
-        band_top += (tallest + 1) * dy  # one empty row between bands
+        previous_half = half
     return fit_to_view(pos, dx, dy, notes)
 
 
@@ -610,9 +613,12 @@ def fit_to_view(pos, dx, dy, notes=None):
         notes.append(f"layout: compressed to {sx:.0%} across and {sy:.0%} down so the whole flow stays inside "
                      f"Arena's view (-32,000 to 32,000); split the model into named views or lower dx/dy for a "
                      f"clearer drawing")
-    if sx < 1 or sy < 1:
-        pos = {k: (x0 + (x - x0) * sx - limit, y0 + (y - y0) * sy - limit) for k, (x, y) in pos.items()}
-    return {k: (int(round(x)), int(round(y))) for k, (x, y) in pos.items()}
+    # 两个坐标轴分别平移或压缩，保留仍在画布内的原点和间距。
+    tx = -limit - x0 * sx if sx < 1 else min(max(0, -limit - x0), limit - x1)
+    ty = -limit - y0 * sy if sy < 1 else min(max(0, -limit - y0), limit - y1)
+    if sx == sy == 1 and (tx or ty) and notes is not None:
+        notes.append("layout: moved the automatic layout inside Arena's view (-32,000 to 32,000)")
+    return {k: (round(x * sx + tx), round(y * sy + ty)) for k, (x, y) in pos.items()}
 
 
 def data_module_keys(a, spec):
@@ -774,8 +780,8 @@ def build(a, spec):
         # extending a model: put the new modules in a clear band below (or beside) what the model already shows
         box = existing_extent(m)
         if box is not None:
-            overrides = dict(overrides, origin=band_origin(box, float(overrides.get("dx", LAYOUT["dx"])),
-                                                           float(overrides.get("dy", LAYOUT["dy"]))))
+            dx, dy, *_ = layout_options(spec)
+            overrides = dict(overrides, origin=band_origin(box, dx, dy))
     layout_notes = []
     x0, y0 = declare_origin(spec.get("declare_at"))
     cursor = [x0, y0, 0]  # placement cursor [x0, y0, count] for data modules without an explicit position
@@ -1232,17 +1238,25 @@ def run(a, model, reps=None, setup_fields=None, changes=None, show=None, outputs
     changes: {module: {operand: value}} applied in memory for this run only and restored afterwards (no save).
     show: Arena expressions evaluated at the end of the LAST replication (e.g. "NQ(Queue1.Queue)", "OVALUE(Stat)").
     per_replication: also return each statistic's value in every replication."""
+    if setup_fields is not None and not isinstance(setup_fields, dict):
+        raise ArenaError("run setup must be an object of field: value")
+    if reps is not None:
+        if type(reps) is not int or reps < 1:
+            raise ArenaError("replications must be a positive integer")
+        setup_fields = dict(setup_fields or {}, replications=reps)
     m = open_model(a, model)
     report = {"errors": [], "warnings": []}
-    if reps:
-        setup_fields = dict(setup_fields or {}, replications=reps)
     old_setup = run_setup_raw(m)
-    apply_run_setup(m, setup_fields, report)
-    old = _apply_in_memory(m, changes, report)
+    old = {}
     try:
-        res = _run_once(a, m, show, outputs, per_replication)
+        apply_run_setup(m, setup_fields, report)
+        if not report["errors"]:
+            old = _apply_in_memory(m, changes, report)
+        # 无效参数不启动求解，避免生成一份采用了部分新参数的报表。
+        res = {"ok": False, "errors": []} if report["errors"] else _run_once(a, m, show, outputs, per_replication)
     finally:
-        _restore(m, old)
+        if old:
+            _restore(m, old)
         if setup_fields:  # put back the exact COM values the model had before this run
             for key in setup_fields:
                 value = old_setup.get(key)
@@ -1264,6 +1278,11 @@ def scenarios(a, model, cases, reps=None, setup_fields=None, show=None, measures
     for c in cases:
         if not isinstance(c, dict):
             raise ArenaError(f"each scenario must be an object with name/changes; got {c!r}")
+        if c.get("run_setup") is not None and not isinstance(c["run_setup"], dict):
+            raise ArenaError("scenario run_setup must be an object of field: value")
+    if setup_fields is not None and not isinstance(setup_fields, dict):
+        raise ArenaError("run setup must be an object of field: value")
+    for c in cases:
         r = run(a, model, reps=c.get("reps", reps),
                 setup_fields={**(setup_fields or {}), **(c.get("run_setup") or {})},
                 changes=c.get("changes"), show=c.get("show", show))

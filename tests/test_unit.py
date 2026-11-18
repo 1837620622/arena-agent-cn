@@ -103,6 +103,21 @@ def test_plan_layout_returns_whole_model_units():
     assert all(isinstance(v, int) for point in core.plan_layout(spec).values() for v in point)
 
 
+def test_plan_layout_keeps_a_tall_second_band_below_the_first():
+    branches = [f"branch-{i}" for i in range(9)]
+    spec = {"modules": [{"id": k} for k in ["start", *branches]],
+            "connections": [{"from": "start", "to": k} for k in branches], "layout": {"columns": 1}}
+    pos = core.plan_layout(spec)
+    assert min(pos[k][1] for k in branches) >= pos["start"][1] + 2 * 1800
+
+
+def test_fit_to_view_corrects_nonzero_origin_on_each_axis():
+    pos = core.fit_to_view({"a": (1200, 40000), "b": (1200, 120000)}, 2600, 1800)
+    assert {x for x, _ in pos.values()} == {1200}
+    assert -32000 <= pos["a"][1] < pos["b"][1] <= 32000
+    assert all(abs(v) <= 32000 for v in core.fit_to_view({"a": (33000, 36000)}, 2600, 1800)["a"])
+
+
 def test_declare_origin_takes_numbers_and_falls_back():
     assert core.declare_origin([100, -200]) == [100, -200]
     assert core.declare_origin(["100", "-200.4"]) == [100, -200]
@@ -127,6 +142,7 @@ def test_layout_options_fall_back_on_bad_values():
     assert core.layout_options({"layout": {"dx": "wide"}}, notes) == (2600.0, 1800.0, 0.0, 0.0, 12)
     assert core.layout_options({"layout": {"dy": 0}}) == (2600.0, 1800.0, 0.0, 0.0, 12)  # a zero step stacks modules
     assert core.layout_options({"layout": {"origin": [1, 2, 3]}}) == (2600.0, 1800.0, 0.0, 0.0, 12)
+    assert core.layout_options({"layout": {"origin": [math.inf, 0]}}) == (2600.0, 1800.0, 0.0, 0.0, 12)
     assert notes and "default" in notes[0]
 
 
@@ -138,7 +154,7 @@ def test_plan_layout_can_leave_out_data_modules():
 def test_data_module_keys_ignores_an_unknown_type():
     defs = SimpleNamespace(Count=1, Find=lambda _search, name, _flag: 1 if name == "Resource" else 0,
                            Item=lambda _index: SimpleNamespace(DataModule=True, Name="Resource"))
-    app = SimpleNamespace(Panels=SimpleNamespace(Attach=lambda _name: SimpleNamespace(ModuleDefinitions=defs)))
+    app = SimpleNamespace(Panels=SimpleNamespace(Attach=lambda name: SimpleNamespace(Name=name, ModuleDefinitions=defs)))
     spec = {"modules": [{"id": "r", "type": "Resource"}, {"id": "x", "type": "NoSuchType"}]}
     assert core.data_module_keys(app, spec) == {"r"}
 
@@ -154,6 +170,8 @@ def test_scenarios_reject_a_case_list_that_is_not_a_list():
         core.scenarios(None, "m.doe", {"name": "one"})  # a single object in the cases file
     with pytest.raises(core.ArenaError, match="each scenario"):
         core.scenarios(None, "m.doe", ["one"])
+    with pytest.raises(core.ArenaError, match="scenario run_setup"):
+        core.scenarios(None, "m.doe", [{"name": "one"}, {"name": "two", "run_setup": ["replications"]}])
 
 
 def test_plan_layout_survives_a_bad_layout_block():
@@ -179,6 +197,32 @@ def test_mirrored_view_is_ordered_and_turned_back():
     assert snapshot._upright(img, (0, 0, 10, 10)) is img  # upright: the tile is used as captured
     mirrored = snapshot._upright(img, (100, 0, 10, 10))  # left > right: Arena draws the view flipped
     assert mirrored.getpixel((0, 0)) == (0, 0, 255) and mirrored.getpixel((1, 0)) == (255, 0, 0)
+
+
+@pytest.mark.parametrize("bounds", [(10, 20, 110, 120), (110, 20, 10, 120),
+                                   (10, 120, 110, 20), (110, 120, 10, 20)])
+def test_paused_crop_tracks_a_nonzero_origin_on_mirrored_axes(monkeypatch, bounds):
+    from arena_agent import snapshot
+    from PIL import Image
+
+    upright = Image.new("RGB", (100, 100))
+    upright.putdata([(x, y, 100) for y in range(100) for x in range(100)])
+    captured = snapshot._upright(upright, bounds)
+    monkeypatch.setattr(snapshot, "client_rect", lambda _: (0, 0, 100, 100))
+    monkeypatch.setattr(snapshot, "_capture_pane", lambda *_: captured)
+    view = SimpleNamespace(**dict(zip(("Left", "Top", "Right", "Bottom"), bounds)))
+    frame, _, _ = snapshot._capture_run_frame(view, 0, (30, 55, 62, 76), None)
+    assert frame.size == (32, 21)
+    assert frame.tobytes() == upright.crop((20, 35, 52, 56)).tobytes()
+
+
+def test_animation_frame_keeps_existing_run_active():
+    from arena_agent import snapshot
+
+    model = SimpleNamespace(Name="live", State=13, End=lambda: pytest.fail("existing run was ended"))
+    app = SimpleNamespace(Version=1400, Models=SimpleNamespace(Count=1, Item=lambda _: model))
+    with pytest.raises(core.ArenaError, match="still active"):
+        snapshot.capture_animation_frame(app, "other.doe", "frame.png", "Detail", 5)
 
 
 def test_screenshot_defaults_to_the_native_screen_scale():
@@ -552,6 +596,14 @@ def test_cli_rejects_a_bad_set_expression_as_json(capsys):
     assert "Module:Operand=Value" in reported["error"]
 
 
+def test_cli_signals_a_failed_scenario(tmp_path, monkeypatch, capsys):
+    cases = tmp_path / "cases.json"
+    cases.write_text('[{"name":"bad"}]', encoding="utf-8")
+    monkeypatch.setattr(cli, "com", lambda *_: {"scenarios": [{"name": "bad", "ok": False}]})
+    assert cli.main(["scenarios", "m.doe", str(cases)]) == 1
+    assert not json.loads(capsys.readouterr().out)["scenarios"][0]["ok"]
+
+
 def test_run_setup_is_read_and_restored_with_raw_com_values():
     model = SimpleNamespace(NumberOfReplications=5, ReplicationLength=480, ReplicationLengthTimeUnits=2,
                             WarmUpPeriod=0, WarmUpPeriodTimeUnits=2, BaseTimeUnits=2, HoursPerDay=24,
@@ -563,6 +615,15 @@ def test_run_setup_is_read_and_restored_with_raw_com_values():
     assert not report["errors"] and (model.NumberOfReplications, model.ReplicationLengthTimeUnits) == (10, 1)
     model.NumberOfReplications, model.ReplicationLengthTimeUnits = raw["replications"], raw["replication_length_units"]
     assert (model.NumberOfReplications, model.ReplicationLengthTimeUnits) == (5, 2)
+
+
+def test_invalid_run_setup_does_not_start_or_leave_partial_changes(monkeypatch):
+    model = SimpleNamespace(FullName="m.doe", NumberOfReplications=5)
+    monkeypatch.setattr(core, "open_model", lambda *_: model)
+    monkeypatch.setattr(core, "_run_once", lambda *_: pytest.fail("invalid run started"))
+    result = core.run(None, "m.doe", setup_fields={"replications": 4, "not_a_field": 5})
+    assert not result["ok"] and "unknown field" in result["errors"][0]["message"]
+    assert model.NumberOfReplications == 5
 
 
 def test_extension_band_stays_inside_the_arena_view():

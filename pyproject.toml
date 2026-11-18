@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "arena-agent"
-version = "0.2.8"
+version = "0.2.9"
 description = "Rockwell Arena 14/16 离散事件仿真建模、批跑、验收和导图工具"
 readme = "README.md"
 license = "MIT"
