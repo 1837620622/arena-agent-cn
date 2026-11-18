@@ -20,6 +20,8 @@ VIEW_SETTINGS = {"SplitScreen": True, "SplitScreenPercent": 99, "Grid": False, "
                  "ShowGuides": False, "ShowPageBreaks": False}
 MOVING_STATES = {13, 14, 15}  # smStateRunning, smStateStepping, smStateFastForward
 RUN_FRAME_STATES = {8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 21}
+ES_CONTINUOUS = 0x80000000
+ES_DISPLAY_REQUIRED = 0x00000002
 
 
 def _dpi_aware():
@@ -91,17 +93,22 @@ def _zoom_for_tile(view, requested, needed):
 
 
 def _capture_pane(pane, client):
-    img = ImageGrab.grab(window=pane)
     x0, y0, x1, y1 = client
-    if img.size != (x1 - x0, y1 - y0):
-        # 某些窗口会连同滚动条和边框一起返回，按客户区实际边界裁切。
-        left, top, right, bottom = win32gui.GetWindowRect(pane)
-        if img.size != (right - left, bottom - top) or not (left <= x0 < x1 <= right and top <= y0 < y1 <= bottom):
-            raise ArenaError("the Arena flowchart window changed size during capture; retry the export")
-        img = img.crop((x0 - left, y0 - top, x1 - left, y1 - top))
-    if img.getbbox() is None:
-        raise ArenaError("Arena returned a black capture; restore the visible interactive desktop and retry")
-    return img
+    for attempt in range(2):
+        img = ImageGrab.grab(window=pane)
+        if img.size != (x1 - x0, y1 - y0):
+            # 某些窗口会连同滚动条和边框一起返回，按客户区实际边界裁切。
+            left, top, right, bottom = win32gui.GetWindowRect(pane)
+            fits = left <= x0 < x1 <= right and top <= y0 < y1 <= bottom
+            if img.size != (right - left, bottom - top) or not fits:
+                raise ArenaError("the Arena flowchart window changed size during capture; retry the export")
+            img = img.crop((x0 - left, y0 - top, x1 - left, y1 - top))
+        if img.getbbox() is not None:
+            return img
+        if attempt == 0:
+            safe(lambda: win32gui.RedrawWindow(pane, None, 0, win32con.RDW_INVALIDATE | win32con.RDW_UPDATENOW))
+            time.sleep(0.1)
+    raise ArenaError("Arena returned a black capture; restore the visible interactive desktop and retry")
 
 
 def _view_bounds(view):
@@ -113,6 +120,8 @@ def _export_view(view, top, child):
     settings = {prop: safe(lambda: getattr(view, prop)) for prop in VIEW_SETTINGS}
     bounds = _view_bounds(view)
     placements = {hwnd: win32gui.GetWindowPlacement(hwnd) for hwnd in (top, child)}
+    set_execution_state = ctypes.windll.kernel32.SetThreadExecutionState
+    previous_state = safe(lambda: set_execution_state(ES_CONTINUOUS | ES_DISPLAY_REQUIRED))
     try:
         # 99% 将表格压在底部，保留绘图区。
         for prop, value in VIEW_SETTINGS.items():
@@ -123,6 +132,8 @@ def _export_view(view, top, child):
         time.sleep(0.8)
         yield
     finally:
+        if previous_state:
+            safe(lambda: set_execution_state(previous_state))
         for hwnd, placement in placements.items():
             if safe(lambda: win32gui.GetWindowPlacement(hwnd)) != placement:
                 safe(lambda: win32gui.SetWindowPlacement(hwnd, placement))
