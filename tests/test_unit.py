@@ -178,6 +178,20 @@ def test_text_report_accepts_lowercase_exponent_and_correlation_flag():
     assert row["maximum"] == pytest.approx(0.1)
 
 
+def test_text_report_keeps_counters_with_infinite_limit():
+    # as Arena 16.20 prints a Record "Count" statistic in a one-replication report
+    txt = ("                                              COUNTERS\n\n"
+           "Identifier                                    Count   Limit\n"
+           "_____________________________________________________________\n\n"
+           "Done                                             81  Infinite\n"
+           "Capped                                           12  50\n")
+    res = results.parse_out(txt)
+    assert res["Done"]["count"] == 81 and res["Done"]["limit"] == "Infinite"
+    assert res["Capped"]["limit"] == 50
+    stats = results.text_statistics(txt.replace("COUNTERS", "Summary for Replication 1 of 1\nCOUNTERS"), True)
+    assert stats["Done"]["replications"] == [81]
+
+
 def test_read_db_matches_out_summary():
     res = results.read_db(os.path.join(DATA, "clinic.db"))
     out = results.parse_out(open(os.path.join(DATA, "clinic.out"), errors="replace").read())
