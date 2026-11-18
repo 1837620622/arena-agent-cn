@@ -13,7 +13,8 @@ command prints JSON.
 
 ## First, every session
 
-1. `arena_status`. It starts Arena if needed (up to a minute) and reports the version and the **edition**.
+1. `arena_status`. It starts Arena if needed (up to a minute) and reports the active COM version, compatibility mode,
+   and **edition**. Arena 14.x selects the text-report batch workflow automatically.
    - `edition.status == "unknown"`: ask the user once, "Are you on the free Arena Student edition, or a full / university
      lab license?", then `set_edition(limited=true|false)`.
    - `"limited"`: keep models small. Rockwell does not publish the exact cap; the Student edition is commonly reported

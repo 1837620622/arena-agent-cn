@@ -5,6 +5,7 @@ prints: the CLI prints the result, the MCP server returns it.
 """
 import json
 from contextlib import contextmanager
+from functools import lru_cache
 from itertools import combinations
 import os
 import re
@@ -23,6 +24,7 @@ from . import results as resultsmod
 
 SEARCH_NAME = 2  # smFindName
 CLSID_KEY = r"Arena.Application\CLSID"
+ARENA_14 = 14
 
 # Friendly exit names -> exit operand. Arena's exit points are hidden operands (see BasicProcess.txt /
 # AdvancedProcess.txt in the Arena folder).
@@ -74,8 +76,12 @@ def temporary_settings(model, **settings):
             setattr(model, key, value)
 
 
-def arena_dir():
-    """Arena's install folder: ARENA_DIR if set, else the folder of the registered COM server (Arena.exe)."""
+def arena_dir(a=None):
+    """Prefer the executable of a running instance, then ARENA_DIR or the registered COM server."""
+    if a is not None:
+        executable = safe(lambda: a.FullName)
+        if executable and os.path.isabs(executable):
+            return os.path.dirname(executable)
     if os.environ.get("ARENA_DIR"):
         return os.environ["ARENA_DIR"]
     # Arena 14 registers a 32-bit COM server. Python may be using the other registry view.
@@ -94,27 +100,31 @@ def arena_dir():
     return None
 
 
-_reserved = None
-
-
-def reserved_words():
+@lru_cache(maxsize=8)
+def _read_reserved_words(directory):
     """SIMAN block and element names (Blocks.txt, Elements.txt in the Arena folder). An attribute or variable with one
     of these names compiles with only a warning, but the run then stops at time 0. SIMAN is case-insensitive."""
-    global _reserved
-    if _reserved is None:
-        _reserved = set()
-        d = arena_dir() or ""
-        for f in ("Blocks.txt", "Elements.txt"):
-            p = os.path.join(d, f)
-            if os.path.exists(p):
-                _reserved |= {w.lower() for w in re.findall(r"^Module:\s*(\w+)", open(p, errors="replace").read(),
-                                                            re.M)}
-    return _reserved
+    words = set()
+    for f in ("Blocks.txt", "Elements.txt"):
+        p = os.path.join(directory, f)
+        if os.path.exists(p):
+            with open(p, errors="replace") as template:
+                words.update(w.lower() for w in re.findall(r"^Module:\s*(\w+)", template.read(), re.M))
+    return words
 
 
-def reserved_clashes(names):
-    rw = reserved_words()
+def reserved_words(a=None):
+    return _read_reserved_words(arena_dir(a) or "")
+
+
+def reserved_clashes(names, a=None):
+    rw = reserved_words(a)
     return sorted(n for n in names if n.split(".")[0].lower() in rw and not n.lower().endswith(".queue"))
+
+
+def com_major_version(version):
+    """Convert Arena's COM version (for example, 1400 or 1620) to a release major."""
+    return version // 100 if isinstance(version, int) and version >= 100 else None
 
 
 def app(visible=True):
@@ -125,8 +135,8 @@ def app(visible=True):
             raise
         directory = arena_dir()
         exe = os.path.join(directory, "Arena.exe") if directory else None
-        version = safe(lambda: win32api.GetFileVersionInfo(exe, "\\")["FileVersionMS"] >> 16)
-        a = _launch_arena14(exe) if version == 14 else wc.Dispatch("Arena.Application")
+        major = safe(lambda: win32api.GetFileVersionInfo(exe, "\\")["FileVersionMS"] >> 16)
+        a = _launch_arena14(exe) if major == ARENA_14 else wc.Dispatch("Arena.Application")
     a.Visible = visible
     return a
 
@@ -211,11 +221,22 @@ def expand(ms, *, flat_record=False):
         for i, row in enumerate(ms.get(key, []), 1):
             if key == "rows" and flat_record:
                 if i > 1:
-                    raise ArenaError("Arena 14 Record takes one row. Use a separate Record module for each statistic.")
+                    raise ArenaError("This Record template takes one row. Use a separate Record module for each statistic.")
                 items.extend(row.items())
             else:
                 items.extend((f"{k}({i})", v) for k, v in row.items())
     return [(k, str(v)) for k, v in items]
+
+
+def _expand_for_definition(spec, definition, major):
+    flat_record = False
+    if spec.get("rows") and definition.Name == "Record":
+        def has_repeat_group():
+            operands = definition.Operands
+            return any(operands.Item(i).Array for i in range(1, operands.Count + 1))
+
+        flat_record = not safe(has_repeat_group, major != ARENA_14)
+    return expand(spec, flat_record=flat_record)
 
 
 def apply_data(mod, items, report, label):
@@ -318,7 +339,10 @@ def connect(m, made, c, report):
 
 def info(a):
     lic = safe(lambda: a.LicenseType)
-    return {"name": safe(lambda: a.Name), "version": safe(lambda: a.Version), "arena_dir": arena_dir(),
+    version = safe(lambda: a.Version)
+    major = com_major_version(version)
+    return {"name": safe(lambda: a.Name), "version": version, "version_major": major,
+            "compatibility_mode": "arena14" if major == ARENA_14 else "default", "arena_dir": arena_dir(a),
             "edition": edition.describe(lic), "models_open": [a.Models.Item(i).FullName
                                                              for i in range(1, a.Models.Count + 1)]}
 
@@ -445,7 +469,7 @@ def build(a, spec):
     for ms in spec.get("modules", []) + [dict(u, type=t) for u in spec.get("updates", []) for t in ("Assign", "ReadWrite")]:
         at, va = used_names(expand(ms), ms.get("type", ""))[:2]
         names |= at | va
-    clash = reserved_clashes(names)
+    clash = reserved_clashes(names, a)
     if clash and not spec.get("allow_reserved"):
         return {"error": "SIMAN reserved words used as attribute/variable names; rename them", "names": clash,
                 "model_changed": False}
@@ -461,7 +485,7 @@ def build(a, spec):
     m.Activate()
     safe(lambda: setattr(m.ActiveView, "AutoConnect", False))
     apply_run_setup(m, spec.get("run_setup"), report)
-    legacy = safe(lambda: int(a.Version)) == 1400
+    major = com_major_version(safe(lambda: a.Version))
     existing = modules_by_name(m)
     for u in spec.get("updates", []):
         mod = existing.get(u["name"])
@@ -469,7 +493,7 @@ def build(a, spec):
             report["errors"].append(f"update: no module named {u['name']!r}")
             continue
         try:
-            items = expand(u, flat_record=legacy and kind(mod) == "Record")
+            items = _expand_for_definition(u, mod.Definition, major)
         except ArenaError as e:
             report["errors"].append(f"{u['name']}: {e}")
             continue
@@ -492,7 +516,7 @@ def build(a, spec):
         try:
             panel = a.Panels.Attach(ms.get("panel", "BasicProcess"))
             d = mdef(panel, ms["type"])
-            items = expand(ms, flat_record=legacy and ms["type"] == "Record")
+            items = _expand_for_definition(ms, d, major)
         except (pythoncom.com_error, ArenaError) as e:
             report["errors"].append(f"module {name or ms.get('id')}: {e}")
             continue
@@ -614,7 +638,7 @@ def set_data(a, model, module, data, save=True):
     items = [(k, str(v)) for k, v in data.items()]
     used = used_names(items, kind(mod))
     at, va = used[:2]
-    clash = reserved_clashes(at | va)
+    clash = reserved_clashes(at | va, a)
     if clash:
         return {"error": "SIMAN reserved words used as attribute/variable names; rename them", "names": clash,
                 "model_changed": False}
@@ -723,7 +747,7 @@ def check_model(m):
     before = os.path.getmtime(p) if os.path.exists(p) else 0
     conns = connection_list(m)
     settings = {"QuietMode": True}
-    if safe(lambda: int(m.Application.Version)) == 1400:
+    if com_major_version(safe(lambda: m.Application.Version)) == ARENA_14:
         settings["DisableReportDatabase"] = True
     with temporary_settings(m, **settings):
         m.Check()
@@ -778,7 +802,7 @@ def end_other_runs(a):
 def _run_once(a, m, show, outputs, per_replication=False):
     ended_first = end_other_runs(a)
     m.Activate()
-    if safe(lambda: int(a.Version)) != 1400:
+    if com_major_version(safe(lambda: a.Version)) != ARENA_14:
         return _run_batch(m, ended_first, show, outputs, per_replication)
 
     # Arena 14 can open a modal DAO/Jet error during COM startup. A batch run only needs SIMAN's text report.

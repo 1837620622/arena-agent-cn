@@ -36,6 +36,8 @@ def test_bank_scenarios_more_tellers_wait_less(tmp_path):
     out = worker.call(core.scenarios, model, [{"name": "2", "changes": {"Teller": {"Capacity": "2"}}},
                                               {"name": "3", "changes": {"Teller": {"Capacity": "3"}}}], 10)
     assert all(s["ok"] for s in out["scenarios"]), out
+    if original_report_settings is not None:
+        assert all(s["results_source"].lower().endswith(".out") for s in out["scenarios"])
     w = [(s["statistics"].get("Teller Service.Queue.Waiting Time") or
           s["statistics"]["Teller Service.Queue.WaitingTime"])["average"] for s in out["scenarios"]]
     assert w[1] < w[0]
@@ -50,7 +52,7 @@ def test_bank_scenarios_more_tellers_wait_less(tmp_path):
 
 def report_settings(app, model):
     m = core.open_model(app, model)
-    if int(app.Version) == 1400:
+    if core.com_major_version(app.Version) == 14:
         return m.DisableReportDatabase, m.DisplayDefaultReport
     return None
 

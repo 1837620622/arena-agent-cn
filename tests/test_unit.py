@@ -2,6 +2,7 @@
 import json
 import math
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,8 +32,60 @@ def test_used_names_process_and_create():
 
 
 def test_reserved_clashes_without_arena(monkeypatch):
-    monkeypatch.setattr(core, "_reserved", {"wait", "group"})
+    monkeypatch.setattr(core, "reserved_words", lambda _: {"wait", "group"})
     assert core.reserved_clashes({"Wait", "RWait", "Group.Queue", "group"}) == ["Wait", "group"]
+
+
+def test_running_arena_selects_its_own_reserved_words(tmp_path, monkeypatch):
+    older = tmp_path / "older"
+    newer = tmp_path / "newer"
+    for folder, name in ((older, "OlderWord"), (newer, "NewerWord")):
+        folder.mkdir()
+        (folder / "Blocks.txt").write_text(f"Module: {name}\n", encoding="utf-8")
+    monkeypatch.setenv("ARENA_DIR", str(older))
+    names = {"OlderWord", "NewerWord"}
+    assert core.reserved_clashes(names) == ["OlderWord"]
+    assert core.reserved_clashes(names, SimpleNamespace(FullName=str(newer / "Arena.exe"))) == ["NewerWord"]
+
+
+@pytest.mark.parametrize(("version", "uses_text_reports"), [
+    (1400, True), (1470, True), (1500, False), (1620, False), (None, False),
+])
+def test_active_version_selects_report_settings(version, uses_text_reports, monkeypatch):
+    app = SimpleNamespace(Version=version)
+    model = SimpleNamespace(Application=app, FullName="model.doe", QuietMode=False, BatchMode=False,
+                            DisableReportDatabase=False, DisplayDefaultReport=0, State=0, Activate=lambda: None)
+    checked = []
+    model.Check = lambda: checked.append((model.QuietMode, model.DisableReportDatabase))
+    monkeypatch.setattr(core, "connection_list", lambda _: [])
+    monkeypatch.setattr(core, "end_other_runs", lambda _: [])
+
+    def run_batch(model, ended, show, outputs, per_replication, legacy=False):
+        assert legacy == uses_text_reports
+        assert model.DisableReportDatabase == uses_text_reports
+        assert model.DisplayDefaultReport == int(uses_text_reports)
+        return "ran"
+
+    monkeypatch.setattr(core, "_run_batch", run_batch)
+    assert core.check_model(model) == ([], [])
+    assert checked == [(True, uses_text_reports)]
+    assert core._run_once(app, model, None, True) == "ran"
+    assert not model.DisableReportDatabase and model.DisplayDefaultReport == 0
+
+
+@pytest.mark.parametrize(("major", "record_array"), [(14, False), (14, True), (16, False), (16, True)])
+def test_record_rows_follow_the_loaded_template(major, record_array):
+    operands = SimpleNamespace(Count=1, Item=lambda _: SimpleNamespace(Array=record_array))
+    definition = SimpleNamespace(Name="Record", Operands=operands)
+    spec = {"rows": [{"Type": "Count"}]}
+    operand = "Type(1)" if record_array else "Type"
+    assert core._expand_for_definition(spec, definition, major) == [(operand, "Count")]
+    spec["rows"].append({"Type": "Time Interval"})
+    if record_array:
+        assert core._expand_for_definition(spec, definition, major)[-1] == ("Type(2)", "Time Interval")
+    else:
+        with pytest.raises(core.ArenaError, match="takes one row"):
+            core._expand_for_definition(spec, definition, major)
 
 
 def test_parse_out_summary():

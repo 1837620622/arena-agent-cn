@@ -1,6 +1,7 @@
 # Gotchas: Arena through COM
 
-The original findings were verified on Arena 16.20. The Arena 14 checks below are specific to version 1400.
+The original findings were verified on Arena 16.20. The native Arena 14 checks below were verified on Arena 14.0
+(COM 1400).
 Background and evidence for each: `arena_guide("discoveries")`.
 
 ## Building
@@ -64,6 +65,10 @@ Background and evidence for each: `arena_guide("discoveries")`.
 
 ## Arena 14
 
+- The agent checks the installed executable's major version before a cold launch and the active COM version for
+  each build, check, and run. COM versions in the 1400–1499 range use the Arena 14.x report settings. Record rows
+  follow the actual template: a flat Record takes one row, and a definition with a repeat group accepts indexed rows.
+  The active version and compatibility mode are shown by `arena_status` and `arena-agent doctor`.
 - A fresh COM launch can fail during Check with `FOPEN`, `SIM.out` and `Permission denied`. The agent starts Arena 14
   in a writable working directory. If an existing instance was started in a protected directory, close it normally
   after saving your work, then let the agent start Arena again.

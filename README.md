@@ -95,10 +95,11 @@ traps (hidden entry points, names that are never declared, reserved words that s
 so far are handled by the tool and written up in
 [`skills/arena-modeling/references/discoveries.md`](skills/arena-modeling/references/discoveries.md).
 
-Tested with Arena 16.20 (version 1620) and Arena 14.0 Professional (version 1400). The Arena 14 batch workflow uses
-SIMAN's `.out` reports. See [Arena 14 troubleshooting](skills/arena-modeling/references/gotchas.md#arena-14).
-For other versions, please open an issue with `arena-agent doctor`
-output if yours does not.
+Native tests have run on Arena 16.20 (COM 1620) and Arena 14.0 Professional (COM 1400). The agent uses the running
+COM version to select its workflow automatically. Arena 14.x uses SIMAN's `.out` reports for batch runs, and
+`arena_status` shows the active version, install folder, and compatibility mode. Record rows follow the loaded
+template's operand definition. See [Arena 14 troubleshooting](skills/arena-modeling/references/gotchas.md#arena-14).
+If a different release behaves unexpectedly, open an issue with `arena-agent doctor` output.
 
 ## Contributing
 
