@@ -55,6 +55,10 @@ Background and evidence for each: `arena_guide("discoveries")`.
 19. **Two edits must never run into the same model at once.** The MCP server serialises calls; do not also run CLI
     builds on the same file from a background shell at the same time.
 20. **Screenshots read the screen.** Anything covering Arena's window spoils `screenshot_model`.
+    For readable details, set `region` to the section bounds and raise `pixels_per_unit` until the labels are legible.
+    Leave a margin around the outer modules and their connectors. Inspect tiled images at 100% for broken lines at
+    the joins and for labels that Arena wraps against a module border. Shorten a crowded label if its full text
+    will not fit, then check any references and rerun the model.
 21. Arena's report database is `<model>.db` (SQLite in Arena 16+), the text report `<model>.out`, errors `<model>.err`
     (binary; arena-agent decodes it and maps each record to its module).
 
