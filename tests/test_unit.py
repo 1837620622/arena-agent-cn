@@ -378,3 +378,6 @@ def test_screenshot_uses_only_the_arena_pane_and_crops_its_border(monkeypatch):
     rendered = snapshot._capture_pane(17, (102, 202, 132, 222))
     assert handles == [17]
     assert rendered.size == (30, 20) and rendered.getextrema() == ((255, 255),) * 3
+    monkeypatch.setattr(snapshot.ImageGrab, "grab", lambda **kwargs: captured.point(lambda _value: 0))
+    with pytest.raises(core.ArenaError, match="black capture"):
+        snapshot._capture_pane(17, (102, 202, 132, 222))

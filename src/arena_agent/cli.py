@@ -24,6 +24,7 @@
   arena-agent results model.doe [--per-rep] [--all]   # statistics of the last run (no new run)
   arena-agent views model.doe                   # list named views
   arena-agent screenshot model.doe out.png [--view NAME | --region X0 Y0 X1 Y1] [--ppu P]
+  arena-agent animation-frame model.doe out.png --view NAME --time T [--speed S] [--timeout SECONDS]
   arena-agent validate model.doe [--reps N] [--png out.png] [--view NAME] [--ppu P]
   arena-agent close  [model.doe ...]
 """
@@ -198,6 +199,19 @@ def main(argv=None):
         view = opt_list(args, "--view")
         res = com(snapshot, pos[0], pos[1], region, float(ppu[0]) if ppu else None,
                   view_name=view[0] if view else None)
+    elif cmd == "animation-frame":
+        from .snapshot import capture_animation_frame
+        view, at, speed, timeout = (opt_list(args, flag) for flag in ("--view", "--time", "--speed", "--timeout"))
+        try:
+            if len(pos) != 2 or len(view) != 1 or len(at) != 1 or len(speed) > 1 or len(timeout) > 1:
+                raise ValueError("use: arena-agent animation-frame model.doe out.png --view NAME --time T")
+            simulation_time = float(at[0])
+            run_speed = float(speed[0]) if speed else 0.5
+            wait = float(timeout[0]) if timeout else 120
+        except ValueError as e:
+            out({"error": str(e)})
+            return 2
+        res = com(capture_animation_frame, pos[0], pos[1], view[0], simulation_time, speed=run_speed, timeout=wait)
     elif cmd == "validate":
         from .validation import validate
         reps = opt_list(args, "--reps")

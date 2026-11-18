@@ -20,7 +20,8 @@ description: 在 Windows 上使用 Rockwell Arena 14 或 16 构建、修改和�
 3. 主流程采用统一阅读方向，分支各占一行或独立区域。用显式 `x`、`y` 定位，留足标签、折线和队列计数空间。检查 `check_errors`、`dropped_connections`、`layout_warnings` 和操作中的读回异常。
 4. 用 `validate_model` 对已保存模型执行原生检查和批跑。指定 `png_path` 可以同时出图。验收结果包含模型文件是否变化、仿真结束时间、原生结果来源与统计项数量。需要明细时用 `run_model` 或 `get_results` 的 `per_replication`。验收会在模型旁生成原生报告文件。
 5. 用流量守恒、利用率数量级和定义的约束核对结果。比较方案时固定观察口径、热身和重复次数，再看差值与 95% 置信区间半宽。统计字段和典型用法见 [结果读取](references/results.md)。
-6. 大模型建模逻辑与动画分别保存命名视图。用 `list_named_views` 查看名称，用 `screenshot_model(view_name=...)` 分区导出。缩放至 100% 核对文字、箭头和拼接处。排版调整保存后重开模型、重新 Check 并按原输入复跑。
+6. 大模型建模逻辑与动画分别保存命名视图。用 `list_named_views` 查看名称，用 `screenshot_model(view_name=...)` 分区导出。Arena 14 可用 `capture_animation_frame` 播放到指定仿真时刻并导出原生帧。已有动画正在运行时，先在 Arena 内显示整个区域，再暂停并用 `screenshot_model` 抓取当前帧。动画从第零分钟播放，检查状态表达式、时钟、移动、排队和回程。
+7. 按最终观看大小逐张核对字体、单位、遮挡、边缘和拼接处。长表达式若被原生对话框截短，可在截图旁补充从 DOE 读回的完整字段。排版调整后复开、重新 Check 并复跑。交付按任务清单核对模型、图纸、截图和动画，成品包内只留约定文件。
 
 ## 常用入口
 
@@ -31,5 +32,6 @@ description: 在 Windows 上使用 Rockwell Arena 14 或 16 构建、修改和�
 | 一次验收 | `validate_model` | `arena-agent validate` |
 | 仿真与结果 | `run_model`、`run_scenarios`、`get_results` | `arena-agent run`、`arena-agent scenarios`、`arena-agent results` |
 | 命名视图和截图 | `list_named_views`、`screenshot_model` | `arena-agent views`、`arena-agent screenshot` |
+| Arena 14 动画定点截图 | `capture_animation_frame` | `arena-agent animation-frame` |
 
 建模时按需读取 [模块用法](references/modules.md)、[兼容性和故障排查](references/gotchas.md) 或[原生行为记录](references/discoveries.md)。导图直接捕获 Arena 绘图窗口，修改或替换 DOE 前先关闭已打开的相应模型。交付按用户指定的文件类型和范围组织。

@@ -6,8 +6,10 @@ from shutil import copyfile
 import time
 
 import pytest
+from PIL import Image
 
 from arena_agent import core, paths, validation, worker
+from arena_agent.snapshot import _view_bounds, capture_animation_frame, snapshot
 
 pytestmark = pytest.mark.arena
 
@@ -49,6 +51,65 @@ def test_validate_runs_native_model_without_saving_it(tmp_path):
         assert result["run"]["replications"] == 2 and result["run"]["end_time"] == 480
         assert result["run"]["statistics_count"] > 0
         assert (tmp_path / "clinic.doe").read_bytes() == saved
+    finally:
+        worker.call(core.close, [model])
+
+
+def test_export_restores_the_editor_view_and_captures_a_paused_frame(tmp_path):
+    model, built = build_example("bank.json", tmp_path)
+    assert built["ok"], built
+
+    def capture(app):
+        m = core.open_model(app, model)
+        m.Activate()
+        v = m.ActiveView
+        detail = m.NamedViews.Create("Detail", "V", -500, -500, 7000, 2500)
+        v.ZoomView(detail)
+        old_bounds = _view_bounds(v)
+        old_split = v.SplitScreenPercent
+        old_grid = v.Grid
+        still = snapshot(app, model, str(tmp_path / "detail.png"), view_name="Detail")
+        assert still["tiles"] == 1
+        assert _view_bounds(v) == pytest.approx(old_bounds, abs=2)
+        assert v.SplitScreenPercent == old_split and v.Grid == old_grid
+
+        if core.com_major_version(app.Version) != 14:
+            return
+        before_animation = Path(model).read_bytes()
+        auto = capture_animation_frame(app, model, str(tmp_path / "timed.png"), "Detail", 4)
+        assert auto["simulation_time"] == pytest.approx(4) and auto["tiles"] == 1
+        assert m.State == 0 and _view_bounds(v) == pytest.approx(old_bounds, abs=2)
+        assert Path(model).read_bytes() == before_animation
+        with core.temporary_settings(m, BatchMode=False, DisableReportDatabase=True, QuietMode=True, RunSpeed=0.1):
+            try:
+                m.Go(2)
+                deadline = time.monotonic() + 10
+                while m.State != 13 and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                assert m.State == 13
+                with pytest.raises(core.ArenaError, match="pause"):
+                    snapshot(app, model, str(tmp_path / "moving.png"))
+                m.BreakOnTime(4)
+                deadline = time.monotonic() + 10
+                while m.State == 13 and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                assert m.State == 16 and m.SIMAN.RunCurrentTime == pytest.approx(4)
+                old_bounds = _view_bounds(v)
+                live = snapshot(app, model, str(tmp_path / "paused.png"))
+                assert live["tiles"] == 1
+                with Image.open(live["out"]) as img:
+                    assert img.size == tuple(live["size"])
+                    assert any(lo < hi for lo, hi in img.convert("RGB").getextrema())
+                with pytest.raises(core.ArenaError, match="outside"):
+                    snapshot(app, model, str(tmp_path / "offscreen.png"), region=(100000, 0, 100500, 500))
+                assert _view_bounds(v) == old_bounds
+                assert m.State == 16 and m.SIMAN.RunCurrentTime == pytest.approx(4)
+            finally:
+                if m.State:
+                    m.End()
+
+    try:
+        worker.call(capture)
     finally:
         worker.call(core.close, [model])
 

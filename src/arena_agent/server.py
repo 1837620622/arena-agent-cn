@@ -185,11 +185,25 @@ def list_named_views(model: str) -> dict:
 @mcp.tool()
 def screenshot_model(model: str, out_path: str | None = None, region: list[float] | None = None,
                      pixels_per_unit: float | None = None, view_name: str | None = None) -> Any:
-    """Export the visible Arena flowchart as a PNG. Choose a saved view by view_name or a rectangle by region
-    [x0, y0, x1, y1]. If both are omitted, fit the whole flowchart. Set pixels_per_unit for a tiled detail export."""
+    """Export an Arena PNG by view_name or by region [x0, y0, x1, y1]. In edit mode, omitting both fits the
+    flowchart. Set pixels_per_unit for a tiled edit-mode export. For animation, first pause with the target region
+    visible in Arena. The paused snapshot captures one frame without changing the current view."""
     from .snapshot import snapshot
     out_path = out_path or os.path.splitext(os.path.abspath(model))[0] + "_flowchart.png"
     res = _guard(snapshot, model, out_path, region, pixels_per_unit, view_name=view_name)
+    if "error" in res:
+        return res
+    return [json.dumps(res), Image(path=res["out"])]
+
+
+@mcp.tool()
+def capture_animation_frame(model: str, out_path: str, view_name: str, simulation_time: float,
+                            speed: float = 0.5, timeout: float = 120) -> Any:
+    """Play one replication with Arena 14's visible 2D animation, pause at simulation_time, and export a PNG.
+    Time is in the model's base units. Select an existing named view. Ends the temporary run afterward.
+    Arena may write native reports beside the model. Use a working copy when existing reports matter."""
+    from .snapshot import capture_animation_frame
+    res = _guard(capture_animation_frame, model, out_path, view_name, simulation_time, speed=speed, timeout=timeout)
     if "error" in res:
         return res
     return [json.dumps(res), Image(path=res["out"])]
