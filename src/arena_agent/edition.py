@@ -36,7 +36,8 @@ def config_path():
 
 def load_config():
     try:
-        return json.load(open(config_path(), encoding="utf-8"))
+        with open(config_path(), encoding="utf-8") as f:
+            return json.load(f)
     except (OSError, ValueError):
         return {}
 
@@ -44,7 +45,10 @@ def load_config():
 def save_config(cfg):
     p = config_path()
     os.makedirs(os.path.dirname(p), exist_ok=True)
-    json.dump(cfg, open(p, "w", encoding="utf-8"), indent=2)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:  # close before replacing: a reader must never see half a file
+        json.dump(cfg, f, indent=2)
+    os.replace(tmp, p)
     return p
 
 

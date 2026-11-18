@@ -114,6 +114,60 @@ def test_expand_tolerates_null_repeat_groups():
     assert core.expand({"data": None, "rows": None, "cases": None, "resources": None}) == []
 
 
+def test_expand_rejects_a_repeat_row_that_is_not_an_object():
+    with pytest.raises(core.ArenaError, match="rows"):
+        core.expand({"rows": ["Type=Attribute"]})  # a bare string used to raise AttributeError
+
+
+def test_layout_options_fall_back_on_bad_values():
+    notes = []
+    assert core.layout_options({"layout": {"dx": 1000, "dy": 900, "origin": [10, 20]}}, notes) == (
+        1000.0, 900.0, 10.0, 20.0, 12)
+    assert not notes
+    assert core.layout_options({"layout": {"dx": "wide"}}, notes) == (2600.0, 1800.0, 0.0, 0.0, 12)
+    assert core.layout_options({"layout": {"dy": 0}}) == (2600.0, 1800.0, 0.0, 0.0, 12)  # a zero step stacks modules
+    assert core.layout_options({"layout": {"origin": [1, 2, 3]}}) == (2600.0, 1800.0, 0.0, 0.0, 12)
+    assert notes and "default" in notes[0]
+
+
+def test_plan_layout_can_leave_out_data_modules():
+    spec = {"modules": [{"id": "a"}, {"id": "r"}], "connections": []}
+    assert set(core.plan_layout(spec, None, skip={"r"})) == {"a"}  # a data module does not take a place in the flow
+
+
+def test_data_module_keys_ignores_an_unknown_type():
+    defs = SimpleNamespace(Count=1, Find=lambda _search, name, _flag: 1 if name == "Resource" else 0,
+                           Item=lambda _index: SimpleNamespace(DataModule=True, Name="Resource"))
+    app = SimpleNamespace(Panels=SimpleNamespace(Attach=lambda _name: SimpleNamespace(ModuleDefinitions=defs)))
+    spec = {"modules": [{"id": "r", "type": "Resource"}, {"id": "x", "type": "NoSuchType"}]}
+    assert core.data_module_keys(app, spec) == {"r"}
+
+
+def test_plan_layout_survives_a_bad_layout_block():
+    spec = {"modules": [{"id": "a"}, {"id": "b"}], "connections": [{"from": "a", "to": "b"}],
+            "layout": {"dx": "wide"}}
+    notes = []
+    pos = core.plan_layout(spec, notes)
+    assert pos["b"][0] > pos["a"][0]  # the default spacing still lays the flow out left to right
+    assert notes
+
+
+def test_mirrored_view_is_ordered_and_turned_back():
+    pytest.importorskip("win32gui")
+    from arena_agent import snapshot
+    from PIL import Image
+
+    assert snapshot._ordered((100, 200, 10, 50)) == (10, 50, 100, 200)
+    assert snapshot._ordered((0, 0, 10, 10)) == (0, 0, 10, 10)
+
+    img = Image.new("RGB", (2, 1))
+    img.putpixel((0, 0), (255, 0, 0))
+    img.putpixel((1, 0), (0, 0, 255))
+    assert snapshot._upright(img, (0, 0, 10, 10)) is img  # upright: the tile is used as captured
+    mirrored = snapshot._upright(img, (100, 0, 10, 10))  # left > right: Arena draws the view flipped
+    assert mirrored.getpixel((0, 0)) == (0, 0, 255) and mirrored.getpixel((1, 0)) == (255, 0, 0)
+
+
 def test_screenshot_defaults_to_the_native_screen_scale():
     pytest.importorskip("win32gui")
     from arena_agent import snapshot

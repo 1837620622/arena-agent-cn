@@ -7,6 +7,7 @@ import json
 from contextlib import contextmanager
 from functools import lru_cache
 from itertools import combinations
+import math
 import os
 import re
 import subprocess
@@ -239,6 +240,8 @@ def expand(ms, *, flat_record=False):
     items = list((ms.get("data") or {}).items())
     for key in ("rows", "cases", "resources"):
         for i, row in enumerate(ms.get(key) or [], 1):
+            if not isinstance(row, dict):
+                raise ArenaError(f"{key} must be a list of objects; entry {i} is {row!r}")
             if key == "rows" and flat_record:
                 if i > 1:
                     raise ArenaError("This Record template takes one row. Use a separate Record module for each statistic.")
@@ -436,7 +439,8 @@ def template_reference(module_type, panel=None):
         p = os.path.join(d, f)
         if not os.path.exists(p):
             continue
-        txt = open(p, errors="replace").read()
+        with open(p, errors="replace") as template:
+            txt = template.read()
         mm = re.search(rf"^Module:\s*{re.escape(module_type)}\s*$(.*?)(?=^Module:|\Z)", txt, re.M | re.S)
         if mm:
             return {"file": p, "module": module_type, "text": ("Module: " + module_type + mm.group(1)).rstrip()}
@@ -529,18 +533,37 @@ def module_key(ms, index):
     return ms.get("id") or (ms.get("data") or {}).get("Name") or f"#{index}"
 
 
-def plan_layout(spec, notes=None):
-    """Default positions for modules built without an explicit x/y. A module sits one column right of the module that
-    feeds it, branches are stacked and centred around the main row, and long chains wrap into bands, so the flowchart
-    reads left to right and modules never share a point. `notes`, when given, collects a warning if the drawing had to
-    be compressed to stay inside Arena's view."""
+def layout_options(spec, notes=None):
+    """dx, dy, origin x/y and columns of the automatic layout. A spec's "layout" may hold text or a short list by
+    mistake; that falls back to the default spacing with a warning instead of failing the whole build."""
     opts = dict(LAYOUT)
     if isinstance(spec.get("layout"), dict):
         opts.update(spec["layout"])
-    dx, dy = float(opts["dx"]), float(opts["dy"])
-    ox, oy = (float(v) for v in opts["origin"])
-    columns_per_band = max(1, int(opts["columns"]))
+    try:
+        dx, dy = float(opts["dx"]), float(opts["dy"])
+        ox, oy = (float(v) for v in opts["origin"])
+        columns = max(1, int(opts["columns"]))
+        if not (dx > 0 and dy > 0 and math.isfinite(dx) and math.isfinite(dy)):
+            raise ValueError("spacing must be positive")
+    except (TypeError, ValueError):
+        if notes is not None:
+            notes.append("layout: dx, dy must be positive numbers, columns a whole number and origin two numbers; "
+                         "the default 2600 x 1800, 12 columns was used")
+        dx, dy = float(LAYOUT["dx"]), float(LAYOUT["dy"])
+        ox, oy = (float(v) for v in LAYOUT["origin"])
+        columns = int(LAYOUT["columns"])
+    return dx, dy, ox, oy, columns
+
+
+def plan_layout(spec, notes=None, skip=()):
+    """Default positions for modules built without an explicit x/y. A module sits one column right of the module that
+    feeds it, branches are stacked and centred around the main row, and long chains wrap into bands, so the flowchart
+    reads left to right and modules never share a point. `skip` leaves modules out of the drawing (data modules, which
+    belong beside the flow); `notes`, when given, collects a warning if the drawing had to be compressed to stay
+    inside Arena's view."""
+    dx, dy, ox, oy, columns_per_band = layout_options(spec, notes)
     keys = [module_key(ms, i) for i, ms in enumerate(spec.get("modules") or [])]
+    keys = [k for k in keys if k not in skip]
     rank = {k: 0 for k in keys}
     edges = [(c.get("from"), c.get("to")) for c in spec.get("connections") or []]
     for _ in range(len(keys)):  # longest path in the graph; the loop stops early, and a cycle cannot run away
@@ -587,6 +610,22 @@ def fit_to_view(pos, dx, dy, notes=None):
     if sx < 1 or sy < 1:
         pos = {k: (x0 + (x - x0) * sx - limit, y0 + (y - y0) * sy - limit) for k, (x, y) in pos.items()}
     return {k: (int(round(x)), int(round(y))) for k, (x, y) in pos.items()}
+
+
+def data_module_keys(a, spec):
+    """Keys of the spec's modules whose type is a data module (Resource, Queue, Variable, Entity ...). They belong
+    beside the flow in the declaration grid, not in it: placed in the flow they read as modules of the process and
+    shift the rows around them."""
+    keys = set()
+    for index, ms in enumerate(spec.get("modules") or []):
+        try:
+            panel = a.Panels.Attach(ms.get("panel", "BasicProcess"))
+            d = mdef(panel, ms.get("type") or "")
+        except (pythoncom.com_error, ArenaError):
+            continue  # a missing or unknown type is reported by the build itself, with its module name
+        if safe(lambda: d.DataModule, False):
+            keys.add(module_key(ms, index))
+    return keys
 
 
 def existing_extent(m):
@@ -663,7 +702,11 @@ def create_views(m, views, report):
 def build(a, spec):
     """Build a new model from a spec, or extend "base" and save it as "save_as". See the skill's spec reference."""
     if isinstance(spec, str):
-        spec = json.load(open(spec, encoding="utf-8"))
+        try:
+            with open(spec, encoding="utf-8") as f:
+                spec = json.load(f)
+        except (OSError, ValueError) as e:
+            return {"error": f"cannot read the spec file {spec}: {type(e).__name__}: {e}", "model_changed": False}
     report = {"errors": [], "warnings": [], "declared": []}
     declared = spec.get("declare") or {}
     for key in ("base", "save_as"):
@@ -728,8 +771,11 @@ def build(a, spec):
             overrides = dict(overrides, origin=band_origin(box, float(overrides.get("dx", LAYOUT["dx"])),
                                                            float(overrides.get("dy", LAYOUT["dy"]))))
     layout_notes = []
+    x0, y0 = declare_origin(spec.get("declare_at"))
+    cursor = [x0, y0, 0]  # placement cursor [x0, y0, count] for data modules without an explicit position
+    data_keys = data_module_keys(a, spec)  # they go beside the flow, so the drawing leaves them out
     # x/y of every module the spec does not place itself; the fit inside Arena's view is reported if it kicked in
-    positions = plan_layout(dict(spec, layout=overrides), layout_notes)
+    positions = plan_layout(dict(spec, layout=overrides), layout_notes, skip=data_keys)
     for index, ms in enumerate(spec.get("modules") or []):
         name = (ms.get("data") or {}).get("Name")
         if name and name in existing:
@@ -746,7 +792,12 @@ def build(a, spec):
             report["errors"].append(f"module {name or ms.get('id')}: {e}")
             continue
         n_before = m.Modules.Count
-        px, py = positions.get(module_key(ms, index), (1000 + 1600 * (n_added % 12), 1000 + 1600 * (n_added // 12)))
+        key = module_key(ms, index)
+        if key in data_keys and ms.get("x") is None and ms.get("y") is None:
+            px, py = declare_position(cursor)  # beside the flow, in the declaration grid, with the auto-declared names
+            cursor[2] += 1
+        else:
+            px, py = positions.get(key, (1000 + 1600 * (n_added % 12), 1000 + 1600 * (n_added // 12)))
         try:  # Arena's coordinates are whole model units; a null x/y means "place it from the graph"
             cx = int(round(float(ms.get("x") if ms.get("x") is not None else px)))
             cy = int(round(float(ms.get("y") if ms.get("y") is not None else py)))
@@ -788,9 +839,7 @@ def build(a, spec):
         collect(items, module_type)
     for u in spec.get("updates") or []:
         collect(expand(u), kind(existing[u.get("name")]) if u.get("name") in existing else "")
-    x0, y0 = declare_origin(spec.get("declare_at"))
-    cursor = [x0, y0, 0]  # placement cursor [x0, y0, count] for the auto-declared data modules
-    for what in DECLARERS:
+    for what in DECLARERS:  # names nothing declared yet, from the same grid cursor
         declare(a, m, existing, found[what], what, cursor, report)
     for k, mod in existing.items():  # connections may name existing modules too
         made.setdefault(k, mod)
@@ -881,6 +930,8 @@ def set_data(a, model, module, data, save=True):
     if mod is None:
         return {"error": f"no module named {module!r}", "model_changed": False}
     report = {"errors": [], "warnings": [], "declared": []}
+    if not isinstance(data, dict) or not data:
+        return {"error": "give at least one operand to set, as {operand: value}", "model_changed": False}
     items = [(k, str(v)) for k, v in data.items()]
     used = used_names(items, kind(mod))
     at, va = used[:2]
@@ -918,7 +969,8 @@ def read_err(m):
     p = os.path.splitext(path)[0] + ".err"
     if not os.path.exists(p) or not os.path.getsize(p):
         return []
-    return parse_err(open(p, "rb").read(), module_serials(m))
+    with open(p, "rb") as report:
+        return parse_err(report.read(), module_serials(m))
 
 
 def module_serials(m):
@@ -1096,8 +1148,8 @@ def _run_batch_locked(m, ended_first, show, outputs, per_replication, legacy):
         res["errors"].append({"level": "error", "message": "the run did not start (no SIMAN run state after Go)"})
     elif legacy and state != 12:  # smStateRunComplete
         res["errors"].append({"level": "error", "message": f"Arena 14 run stopped before completion (State {state})"})
-    p = os.path.splitext(model_path)[0] + ".err"
-    fresh = lambda: os.path.exists(p) and os.path.getmtime(p) > t0  # noqa: E731
+    p = os.path.splitext(model_path)[0] + ".err" if model_path else ""  # an unsaved model has no report beside it
+    fresh = lambda: bool(p) and os.path.exists(p) and os.path.getmtime(p) > t0  # noqa: E731
     if fresh():
         res["errors"].extend(read_err(m))
     if show:  # read before End(), which resets the run; a bad expression writes its own record to .err

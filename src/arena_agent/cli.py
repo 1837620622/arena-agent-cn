@@ -1,5 +1,7 @@
 """arena-agent: drive Rockwell Arena from the command line or from an AI agent. Every command prints JSON.
 
+Exit codes: 0 success, 1 the result reports an error or ok: false, 2 a bad argument or usage.
+
   arena-agent doctor                            # is everything in place? (Arena, COM, edition, AI clients)
   arena-agent install [--client NAME ...]       # register the MCP server and skill with Claude Code / Desktop / Codex
   arena-agent uninstall [--client NAME ...]
@@ -207,7 +209,8 @@ def dispatch(cmd, args, pos):
         if t not in topics:
             out({"error": f"unknown topic {t!r}", "topics": sorted(topics)})
             return 2
-        print(open(topics[t], encoding="utf-8").read())
+        with open(topics[t], encoding="utf-8") as f:
+            print(f.read())
         return 0
     if cmd == "results":
         from . import core
@@ -252,7 +255,8 @@ def dispatch(cmd, args, pos):
             res["statistics"] = {k: v for k, v in res["statistics"].items() if any(q.lower() in k.lower() for q in ms)}
     elif cmd == "scenarios":
         reps = opt_list(args, "--reps")
-        cases = json.load(open(pos[1], encoding="utf-8"))
+        with open(pos[1], encoding="utf-8") as f:
+            cases = json.load(f)
         res = com(core.scenarios, pos[0], cases, int(reps[0]) if reps else None, None, None,
                   opt_list(args, "--measures") or None)
     elif cmd == "views":
@@ -330,7 +334,11 @@ def dispatch(cmd, args, pos):
         print(__doc__)
         return 2
     out(res)
-    return 1 if isinstance(res, dict) and res.get("error") else 0
+    if isinstance(res, dict) and res.get("error"):
+        return 1
+    if isinstance(res, dict) and res.get("ok") is False:  # a failed check, build or run: not a successful command
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

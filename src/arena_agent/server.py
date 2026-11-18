@@ -56,7 +56,8 @@ def arena_guide(topic: str = "skill") -> dict:
     p = topics.get(topic)
     if not p or not os.path.exists(p):
         return {"error": f"unknown topic {topic!r}", "topics": sorted(topics)}
-    return {"topic": topic, "topics": sorted(topics), "text": open(p, encoding="utf-8").read()}
+    with open(p, encoding="utf-8") as f:
+        return {"topic": topic, "topics": sorted(topics), "text": f.read()}
 
 
 @mcp.tool()
@@ -104,7 +105,8 @@ def build_model(spec: dict[str, Any] | None = None, spec_path: str | None = None
     (from, to, exit), updates to existing modules, run_setup, declare, delete. Modules without x/y are placed from the
     connection graph (tune with "layout": dx, dy, columns, origin); "views" saves named views from module names or a
     region; "shapes" adds titles with level title|section|note. Names used by Assign, ReadWrite, Process, Hold,
-    Search and Create are declared automatically, in a grid rather than stacked. Compiles at the end: read
+    Search and Create are declared automatically, in a grid beside the flow rather than stacked, and data modules
+    listed without x/y go into that same grid. Compiles at the end: read
     check_errors (each names the module at fault) and dropped_connections. Spec format: arena_guide "build-spec"."""
     if spec is None and spec_path is None:
         return {"error": "pass spec or spec_path"}

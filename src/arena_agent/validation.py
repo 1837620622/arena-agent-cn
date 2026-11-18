@@ -19,7 +19,7 @@ def validate(a, model, replications=1, png_path=None, view_name=None, pixels_per
     path = Path(model).resolve()
     if not path.is_file():
         raise core.ArenaError(f"no such model file: {path}")
-    if any(a.Models.Item(i).State for i in range(1, a.Models.Count + 1)):
+    if any(core.safe(lambda: a.Models.Item(i).State, 0) for i in range(1, a.Models.Count + 1)):
         raise core.ArenaError("end the active Arena run before validating a model")
 
     m = core.open_model(a, str(path))

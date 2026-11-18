@@ -87,6 +87,8 @@ def _copy_skill(client):
         return None  # no bundled skill (packaging without it): the arena_guide tool still serves the text
     if os.path.isdir(dst):
         shutil.rmtree(dst)
+    elif os.path.exists(dst):  # a stray file where the skill folder belongs
+        os.remove(dst)
     shutil.copytree(src, dst)
     return dst
 

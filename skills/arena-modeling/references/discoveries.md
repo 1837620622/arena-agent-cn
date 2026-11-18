@@ -637,6 +637,43 @@ report's printed precision.
 - **Finding (docs):** the 2026-11-04 session numbered its two entries 54 and 55, which already existed above.
 - **Change:** renumbered to 59 and 60; this session continues from 61.
 
+## Session 2026-11-06: 镜像视图、退出码与文件句柄
+
+### 67. 颠倒的视图边界让拼接图错位
+- **Finding (code):** `_capture_run_frame` already allowed for a view reported with `Top > Bottom`, but the tiled
+  editor path compared and pasted with the raw report order: `_zoom_for_tile` required `left <= x0 <= right`, and
+  `_capture_tiles` computed the paste box as `(left - X0) * ppu … (right - X0) * ppu`, which is negative width and
+  clamped to a one-pixel sliver for a mirrored view. A mirrored view would also have pasted mirrored content.
+- **Change:** `_ordered()` normalises every readback to (x_lo, y_lo, x_hi, y_hi); `_capture_tiles` pastes at the
+  ordered position, `_capture_run_frame` maps the crop on both axes, and `_upright()` turns a mirrored tile back
+  before it is pasted. `_export_view` restores the old view with ordered bounds too.
+
+### 68. 命令行退出码只看 error 键
+- **Finding (code):** `arena-agent check` (and `build`, `run`) printed `ok: false` and still exited 0, so
+  `arena-agent build spec.json && arena-agent validate …` carried on with a model that failed its own check.
+- **Change:** exit 1 when the result has `error` or `ok: false`; 2 stays for bad arguments, 0 for success.
+
+### 69. 文件句柄没有关闭，配置写入不是原子的
+- **Finding (code):** the spec file, the template reference, `.err`, the skill guide and `edition`'s config were read
+  or written through `open(...)` without closing; on Windows the handle can keep a lock on the file, and a crash
+  mid-write left a truncated `config.json`. `save_config` now writes a temporary file and replaces it.
+- **Change:** every read is a `with` block; `build` reports an unreadable spec file as JSON instead of a traceback.
+
+### 70. 规格与布局参数的类型
+- **Finding (code):** a repeat row that is not an object (`"rows": ["Type=Attribute"]`) raised AttributeError;
+  `layout` with text or a three-value `origin` raised an uncaught ValueError; `set_module` with an empty `data`
+  returned a half-filled result instead of an error.
+- **Change:** `expand` rejects a malformed row with the row number, `layout_options()` falls back to the default
+  spacing with a warning, and `set_data` asks for at least one operand.
+
+### 71. 显式列出的数据模块挤进了流程图
+- **Finding (code):** `plan_layout` placed every spec module from the connection graph, data modules included, so a
+  `{"type": "Resource"}` with no x/y got a column of its own in the flow — reading as a process module and shifting
+  the rows around it through the branch centring. The grid the auto-declared names use was built only afterwards.
+- **Change:** `data_module_keys()` collects the spec's data-module types (an unknown type is left to the build loop,
+  which reports it), `plan_layout(..., skip=...)` leaves them out of the drawing, and each of them without x/y takes
+  the next cell of the same declaration grid as the auto-declared names.
+
 ## Open items (to try next)
 
 - Lint `AQUE`/`SAQUE`/`AG`/`SAG`/`ATTR` calls for a bare attribute name (22).

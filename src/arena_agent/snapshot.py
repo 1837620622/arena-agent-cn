@@ -125,18 +125,39 @@ def content_bbox(m):
     return _union(flowchart)
 
 
+def _ordered(bounds):
+    """View bounds as (x_lo, y_lo, x_hi, y_hi). Arena reports a mirrored view with left > right or top > bottom, and
+    every comparison and paste position below has to work in model coordinates, not in raw report order."""
+    left, top, right, bottom = bounds
+    x_lo, x_hi = sorted((left, right))
+    y_lo, y_hi = sorted((top, bottom))
+    return x_lo, y_lo, x_hi, y_hi
+
+
 def _zoom_for_tile(view, requested, needed):
     """Read back the viewport before capturing. Arena 14 can double its first ZoomRegion coordinates."""
     x0, y0, x1, y1 = needed
     for _ in range(2):
         view.ZoomRegion(*requested)
         time.sleep(0.5)
-        left, top, right, bottom = view.Left, view.Top, view.Right, view.Bottom
+        bounds = _view_bounds(view)
+        left, top, right, bottom = bounds
+        x_lo, y_lo, x_hi, y_hi = _ordered(bounds)
         # View bounds are rounded to integer model units.
-        if (left <= x0 + 2 and right >= x1 - 2
-                and min(top, bottom) <= y0 + 2 and max(top, bottom) >= y1 - 2):
+        if x_lo <= x0 + 2 and x_hi >= x1 - 2 and y_lo <= y0 + 2 and y_hi >= y1 - 2:
             return left, top, right, bottom
     raise ArenaError(f"Arena could not display screenshot tile {needed}; reduce the zoom or select a smaller region")
+
+
+def _upright(img, bounds):
+    """A mirrored view draws the model flipped: a captured tile has to be turned back before it is pasted at its
+    place on the canvas, or the joined image shows mirrored modules."""
+    left, top, right, bottom = bounds
+    if left > right:
+        img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    if top > bottom:
+        img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+    return img
 
 
 def _capture_pane(pane, client):
@@ -204,13 +225,13 @@ def _export_view(view, top, child):
         for prop, value in settings.items():
             if value is not None and safe(lambda: getattr(view, prop)) != value:
                 safe(lambda: setattr(view, prop, value))
-        left, top_y, right, bottom = bounds
         # 先恢复窗口和表格的尺寸，再还原原动画或逻辑视野。Arena 的边界读数为整数。
+        restore = _ordered(bounds)
         for _ in range(2):
             current = safe(lambda: _view_bounds(view))
             if current is None or all(abs(old - now) <= 2 for old, now in zip(bounds, current)):
                 break
-            safe(lambda: view.ZoomRegion(left, min(top_y, bottom), right, max(top_y, bottom)))
+            safe(lambda: view.ZoomRegion(*restore))
 
 
 def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64, *, view_name=None):
@@ -281,25 +302,28 @@ def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64, *, view_na
 def _capture_run_frame(view, pane, region, ppu):
     # Arena 14 在暂停时用 ZoomRegion 会放大或缩小实际绘制结果，即使 COM 边界读回正常。
     # 直接截取当前帧，视野外的区域需要先在 Arena 内切到对应的命名视图。
-    left, top, right, bottom = _view_bounds(view)
+    bounds = _view_bounds(view)
+    left, top, right, bottom = bounds
+    x_lo, y_lo, x_hi, y_hi = _ordered(bounds)
     client = client_rect(pane)
     width, height = client[2] - client[0], client[3] - client[1]
-    if right <= left or bottom == top or width <= 0 or height <= 0:
+    if x_hi <= x_lo or y_hi <= y_lo or width <= 0 or height <= 0:
         raise ArenaError("the Arena animation pane is not visible")
-    view_region = (left, min(top, bottom), right, max(top, bottom))
+    view_region = (x_lo, y_lo, x_hi, y_hi)
     if region is None:
         region = view_region
     x0, y0, x1, y1 = region
-    min_y, max_y = view_region[1], view_region[3]
-    if x0 < left - 2 or x1 > right + 2 or y0 < min_y - 2 or y1 > max_y + 2:
+    if x0 < x_lo - 2 or x1 > x_hi + 2 or y0 < y_lo - 2 or y1 > y_hi + 2:
         raise ArenaError("the screenshot region is outside the current paused view; show the whole region in Arena first")
-    scale_x, scale_y = width / (right - left), height / abs(bottom - top)
-    crop_y0, crop_y1 = (y0 - top, y1 - top) if bottom > top else (top - y1, top - y0)
-    box = (max(0, round((x0 - left) * scale_x)), max(0, round(crop_y0 * scale_y)),
-           min(width, round((x1 - left) * scale_x)), min(height, round(crop_y1 * scale_y)))
+    scale_x, scale_y = width / (x_hi - x_lo), height / (y_hi - y_lo)
+    # 视野左右或上下颠倒时，屏幕坐标从大值往小值走，裁剪框要按同一方向换算。
+    col0, col1 = (x0, x1) if left <= right else (x_hi - x1, x_hi - x0)
+    row0, row1 = (y0, y1) if top <= bottom else (y_hi - y1, y_hi - y0)
+    box = (max(0, round((col0 - x_lo) * scale_x)), max(0, round((row0 - y_lo) * scale_y)),
+           min(width, round((col1 - x_lo) * scale_x)), min(height, round((row1 - y_lo) * scale_y)))
     if box[2] <= box[0] or box[3] <= box[1]:
         raise ArenaError("the screenshot region is smaller than one screen pixel")
-    image = _capture_pane(pane, client).crop(box)
+    image = _upright(_capture_pane(pane, client).crop(box), bounds)
     if ppu is not None:
         size = (max(1, round((x1 - x0) * ppu)), max(1, round((y1 - y0) * ppu)))
         if size[0] > image.width or size[1] > image.height:
@@ -349,13 +373,12 @@ def _capture_tiles(v, pane, region, ppu, max_tiles):
             requested = (x, y, x + pw / ppu, y + ph / ppu)
             needed = (x, y, min(x + tw, X1), min(y + th, Y1))
             left, top, right, bottom = _zoom_for_tile(v, requested, needed)
-            px, right_px = round((left - X0) * ppu), round((right - X0) * ppu)
-            if bottom >= top:
-                py, bottom_px = round((top - Y0) * ppu), round((bottom - Y0) * ppu)
-            else:
-                py, bottom_px = round((Y1 - top) * ppu), round((Y1 - bottom) * ppu)
+            x_lo, y_lo, x_hi, y_hi = _ordered((left, top, right, bottom))
+            px, right_px = round((x_lo - X0) * ppu), round((x_hi - X0) * ppu)
+            py, bottom_px = round((y_lo - Y0) * ppu), round((y_hi - Y0) * ppu)
             size = (max(1, right_px - px), max(1, bottom_px - py))
-            canvas.paste(_resample(_capture_pane(pane, pr), size), (px, py))
+            tile = _upright(_capture_pane(pane, pr), (left, top, right, bottom))
+            canvas.paste(_resample(tile, size), (px, py))
     return canvas, nx * ny, ppu
 
 
@@ -400,7 +423,10 @@ def capture_animation_frame(a, model, out_path, view_name, simulation_time, *, s
                 state = m.State
             now = safe(lambda: m.SIMAN.RunCurrentTime)  # no SIMAN run state: the run never really started
             if state != 13 or now is None or now >= simulation_time:
-                raise ArenaError(f"Arena could not set the animation breakpoint at {simulation_time:g} (state {state})")
+                hint = ("; the run had already finished, so lower speed and retry" if state in (11, 12)
+                        else "; lower speed so the tool has time to pause, or pick a time the run reaches")
+                raise ArenaError(f"Arena could not set the animation breakpoint at {simulation_time:g} "
+                                 f"(state {state}){hint}")
             m.BreakOnTime(simulation_time)
             state = m.State
             while state == 13 and time.monotonic() < deadline:
@@ -415,8 +441,8 @@ def capture_animation_frame(a, model, out_path, view_name, simulation_time, *, s
             return {**result, "simulation_time": current_time,
                     **({"ended_first": ended_first} if ended_first else {})}
         finally:
-            if m.State:
-                m.End()
+            if safe(lambda: m.State, 0):
+                safe(lambda: m.End())
 
 
 def capture_animation_frames(a, model, out_dir, view_name, times, *, speed=0.5, timeout=120, prefix="frame"):
@@ -441,9 +467,13 @@ def capture_animation_frames(a, model, out_dir, view_name, times, *, speed=0.5, 
     if not prefix.strip() or any(ch in prefix for ch in '\\/:*?"<>|'):
         raise ArenaError('prefix must be a plain file name, without path separators or \\ / : * ? " < > |')
     os.makedirs(out_dir, exist_ok=True)
-    frames = []
+    frames, used = [], set()
     for t in values:
-        out_path = os.path.join(out_dir, f"{prefix}_{t:g}.png")
+        name = f"{prefix}_{t:g}.png"
+        if name in used:  # two times that print alike: keep both frames instead of overwriting one
+            name = f"{prefix}_{t:.17g}.png"
+        used.add(name)
+        out_path = os.path.join(out_dir, name)
         res = capture_animation_frame(a, model, out_path, view_name, t, speed=speed, timeout=timeout)
         frames.append({"out": res["out"], "size": res["size"], "simulation_time": res["simulation_time"]})
     return {"model": os.path.abspath(model), "view_name": view_name, "frames": frames, "count": len(frames),

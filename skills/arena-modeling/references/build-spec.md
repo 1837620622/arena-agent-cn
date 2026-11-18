@@ -64,7 +64,8 @@ one, sets every module, declares the names they use, connects them, compiles and
   and the build result says so in `warnings`; split such a model into named views instead of shrinking the spacing
   further. Coordinates from the spec are rounded to whole model units, which is what Arena's COM methods take.
 - Data modules (Resource, Variable, Queue, Entity, Attribute, Expression, Statistic, Schedule ...) need no x/y.
-  Names declared automatically are laid out in a 6-wide grid from `declare_at`, so they never stack on one point.
+  A data module listed in `modules` without x/y, and every name declared automatically, is placed in a 6-wide grid
+  from `declare_at`: beside the flow, never stacked on one point and never inside the process drawing.
 
 ## Titles and named views
 

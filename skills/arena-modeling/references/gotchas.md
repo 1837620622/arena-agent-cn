@@ -24,7 +24,8 @@ Background and evidence for each: `arena_guide("discoveries")`.
    (fails check until edited; delete it with the spec's `delete`), Hold/Search -> a queue, Batch -> `<name>.Queue`.
    Names the tools declare themselves are placed in a 6-wide grid from `declare_at` (Attribute, Variable, Queue,
    Resource, Entity share one cursor), because several data modules created at one point pile up and read as one
-   unreadable block in the flowchart and in every export.
+   unreadable block in the flowchart and in every export. A data module listed in the spec without x/y joins the
+   same grid instead of taking a place in the flow.
 7. **Changing a Hold's queue settings can drop its incoming connections.** Re-check after editing a Hold.
 8. **View coordinates are 16-bit.** Modules can be placed anywhere through COM, but the GUI only shows -32,768..32,767.
    Keep layouts inside +-32,000; compress spacing for big models.
@@ -70,7 +71,11 @@ Background and evidence for each: `arena_guide("discoveries")`.
     100% for broken lines at the joins and for labels that Arena wraps against a module border. Shorten a crowded
     label if its full text will not fit, then check any references and rerun the model.
 21. Arena's report database is `<model>.db` (SQLite in Arena 16+), the text report `<model>.out`, errors `<model>.err`
-    (binary; arena-agent decodes it and maps each record to its module).
+    (binary; arena-agent decodes it and maps each record to its module). A model with no saved path has no report
+    beside it, so the run reports "no report was read" instead of looking for `.err` in the working directory.
+22. **Close every file you read or write.** Arena holds `.doe`, `.out` and `.err` open, and an unclosed handle in a
+    helper keeps a lock on the user's config or report. Config files are written to a temporary file and replaced, so
+    a reader never sees half a JSON file.
 
 ## Arena 14
 
@@ -104,3 +109,8 @@ Background and evidence for each: `arena_guide("discoveries")`.
   both frames before blaming playback.
 - The flowchart pane is normally `Afx:…:8:…`; where a build numbers it differently the exporter takes the largest
   visible `Afx:` child that is not the spreadsheet (`AfxFrameOrView…`).
+- A view can report mirrored bounds (`Left > Right`, `Top > Bottom`). Every export path compares and pastes in model
+  coordinates, so the bounds are ordered first and a captured tile from a mirrored view is turned back before it is
+  pasted; without that, a tiled image shows mirrored modules in the wrong place.
+- `arena-agent` exits 0 on success, 1 when the result reports `error` or `ok: false` (a failed check, build or run),
+  and 2 for a bad argument, so `arena-agent build … && arena-agent validate …` stops at the first failure.
