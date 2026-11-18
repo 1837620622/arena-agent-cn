@@ -13,22 +13,31 @@
 
 ## 安装和更新
 
-先安装 Rockwell Arena 并确认能正常打开。推荐用 [uv](https://docs.astral.sh/uv/getting-started/installation/) 管理 Python 运行环境。以下命令从本仓库安装，更新时可重跑第一条。
+先安装 Rockwell Arena 并确认能正常打开。Windows 安装脚本通过 [uv](https://docs.astral.sh/uv/getting-started/installation/) 管理独立的 Python 环境，并登记受支持的本地客户端。
 
 ```powershell
-uv tool install --force --python 3.12 https://github.com/1837620622/arena-agent-cn/archive/refs/heads/main.zip
+git clone https://github.com/1837620622/arena-agent-cn.git
+Set-Location arena-agent-cn
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 arena-agent --version
 arena-agent doctor
 ```
 
-连接 Codex 或 Claude Code，选你使用的客户端执行。登记后重新连接 MCP，工具就会出现在新会话中。
+需要单独登记某个客户端时，执行对应命令。登记后重新连接 MCP，工具就会出现在新会话中。
 
 ```powershell
 arena-agent install --client codex
 arena-agent install --client claude-code
 ```
 
-也可以克隆仓库后运行 `install.ps1`，它会安装工具并登记本机支持的客户端。Claude Code 插件入口是 `/plugin marketplace add 1837620622/arena-agent-cn`，添加后运行 `/plugin install arena-agent`。
+已有客户端配置时可用 `-UpdateOnly` 更新运行包。安装器会在替换环境前检查进程，提示占用时先结束对应的 Arena MCP 会话或命令行任务。
+
+```powershell
+git pull --ff-only
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -UpdateOnly
+```
+
+Claude Code 插件入口是 `/plugin marketplace add 1837620622/arena-agent-cn`，添加后运行 `/plugin install arena-agent`。
 
 ### CC Switch 安装技能
 
@@ -47,6 +56,8 @@ arena-agent results bank.doe --per-rep
 ```
 
 `validate` 依次调用 Arena 原生 Check 和批跑，报告布局警告、结束时间、重复次数、原生结果来源和统计项数量，并比对验收前后的 DOE 文件哈希。`ok: true` 表示这些检查通过。原生 `.out` 或 `.db` 等运行文件保存在模型旁，需要隔离结果时请先复制模型及其相对路径依赖。
+
+Arena 14 批跑以本轮原生 `.out` 中的统计为准。`results` 离线回读时，从已有的可读报告中按最后写入时间选取最新结果。
 
 导出整图可在验收时加 `--png`。模型已保存命名视图时，可读取视图列表，按实际名称导出分区图。可调 `--ppu` 提高文字和连线分辨率。出图时保持 Arena 窗口可见且无遮挡。
 

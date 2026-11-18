@@ -10,6 +10,8 @@
 #   ARENA_AGENT_SOURCE   what to install (default: the latest code on GitHub; a local folder works for development)
 #   ARENA_AGENT_CLIENTS  space-separated clients to register (default: all found): claude-code claude-desktop codex
 
+param([switch]$UpdateOnly)
+
 # Not 'Stop': Windows PowerShell 5.1 turns anything a program writes to stderr (uv prints progress and notes there)
 # into a terminating error. Failures are checked explicitly with $LASTEXITCODE instead.
 $ErrorActionPreference = 'Continue'
@@ -33,16 +35,39 @@ if (-not $uv) {
 }
 
 # 2. arena-agent itself, with a private Python 3.12
-Say "Installing arena-agent from $src"
-& $uv.Source tool install --force --python 3.12 $src
-if ($LASTEXITCODE -ne 0) { throw 'uv could not install arena-agent (see the messages above).' }
-& $uv.Source tool update-shell *> $null  # puts uv's tool folder on PATH for new terminals; harmless if already there
+$tools = & $uv.Source tool dir
+if ($LASTEXITCODE -ne 0 -or -not $tools) { throw 'uv could not locate its tool directory.' }
+$bin = & $uv.Source tool dir --bin
+if ($LASTEXITCODE -ne 0 -or -not $bin) { throw 'uv could not locate its command directory.' }
+$scripts = Join-Path $tools.Trim() 'arena-agent\Scripts\'
+$exe = Join-Path $bin.Trim() 'arena-agent.exe'
 
-$exe = Join-Path $env:USERPROFILE '.local\bin\arena-agent.exe'
-if (-not (Test-Path $exe)) {
-    $bin = (& $uv.Source tool dir --bin).Trim()
-    $exe = Join-Path $bin 'arena-agent.exe'
+# A running Windows tool can hold its interpreter open while uv replaces the environment.
+if (Test-Path -LiteralPath $scripts) {
+    $running = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop `
+        -Filter "Name='python.exe' OR Name='pythonw.exe' OR Name='arena-agent.exe'" | Where-Object {
+            $_.ExecutablePath -and (
+                $_.ExecutablePath.StartsWith($scripts, [StringComparison]::OrdinalIgnoreCase) -or
+                $_.ExecutablePath -ieq $exe
+            )
+        })
+    if ($running.Count) {
+        throw ('arena-agent is in use (PID ' + ($running.ProcessId -join ', ') +
+               '). Close the MCP session or CLI job using it, then retry the update.')
+    }
 }
+
+Say "Installing arena-agent from $src"
+& $uv.Source tool install --force --refresh-package arena-agent --python 3.12 $src
+if ($LASTEXITCODE -ne 0) { throw 'uv could not install arena-agent (see the messages above).' }
+
+if ($UpdateOnly) {
+    & $exe --version
+    if ($LASTEXITCODE -ne 0) { throw 'The updated arena-agent could not start.' }
+    return
+}
+
+& $uv.Source tool update-shell *> $null  # puts uv's tool folder on PATH for new terminals
 
 # 3. register with the AI clients on this machine
 Say 'Connecting arena-agent to your AI tools'

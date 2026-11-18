@@ -2,6 +2,7 @@
 import json
 import math
 import os
+from shutil import copyfile
 from types import SimpleNamespace
 
 import pytest
@@ -140,6 +141,33 @@ def test_text_fallback_uses_each_printed_replication(tmp_path):
     assert wait["replications"][:3] == [5.9228, 32.970, 5.2357]
     assert stats["Doctor.ScheduledUtilization"]["average"] == pytest.approx(0.79324)
     assert len(stats["Doctor.ScheduledUtilization"]["replications"]) == 10
+
+
+def test_latest_report_is_read_offline_and_database_is_preferred_during_standard_run(tmp_path):
+    model = tmp_path / "clinic # 100%.doe"
+    db, out = model.with_suffix(".db"), model.with_suffix(".out")
+    copyfile(os.path.join(DATA, "clinic.db"), db)
+    copyfile(os.path.join(DATA, "clinic.out"), out)
+    os.utime(db, (1000, 1000))
+    os.utime(out, (1100, 1100))
+
+    latest = core.last_results(model, per_replication=True)
+    assert latest["source"] == str(out)
+    assert latest["statistics"]["Examination.Queue.WaitingTime"]["replications"][:3] == [5.9228, 32.970, 5.2357]
+    assert results.read(model, since=900)["source"] == str(db)
+
+
+def test_text_only_run_requires_current_siman_statistics(tmp_path):
+    model = tmp_path / "clinic.doe"
+    db, out = model.with_suffix(".db"), model.with_suffix(".out")
+    copyfile(os.path.join(DATA, "clinic.db"), db)
+    copyfile(os.path.join(DATA, "clinic.out"), out)
+    os.utime(db, (1100, 1100))
+    os.utime(out, (1000, 1000))
+    assert results.read(model, since=900, text_only=True)["source"] == str(out)
+    assert results.read(model, since=1050, text_only=True)["source"] is None
+    out.write_bytes(b"")
+    assert results.read(model, since=900, text_only=True)["source"] is None
 
 
 def test_text_report_accepts_lowercase_exponent_and_correlation_flag():

@@ -1,6 +1,9 @@
 """End-to-end tests against a local Arena: pytest -m arena"""
 import json
 import os
+from pathlib import Path
+from shutil import copyfile
+import time
 
 import pytest
 
@@ -55,6 +58,12 @@ def test_bank_scenarios_more_tellers_wait_less(tmp_path):
     assert res["ok"], res
     saved_model = (tmp_path / "bank.doe").read_bytes()
     original_report_settings = worker.call(report_settings, model)
+    if original_report_settings is not None:
+        # 先放入与本轮无关的数据库，确保 Arena 14 批跑只读自己写出的文本报告。
+        previous_db = tmp_path / "bank.db"
+        copyfile(Path(__file__).parent / "data" / "clinic.db", previous_db)
+        future = time.time() + 3600
+        os.utime(previous_db, (future, future))
     out = worker.call(core.scenarios, model, [{"name": "2", "changes": {"Teller": {"Capacity": "2"}}},
                                               {"name": "3", "changes": {"Teller": {"Capacity": "3"}}}], 10)
     assert all(s["ok"] for s in out["scenarios"]), out

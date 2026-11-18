@@ -872,13 +872,13 @@ def _run_batch(m, ended_first, show, outputs, per_replication, legacy=False):
     if safe(lambda: m.State, 0) != 0:  # still in run mode: the next run of any model would stall
         res["errors"].append({"level": "error", "message": f"model still in run mode after End() (State {m.State})"})
     if outputs:
-        r = resultsmod.read(m.FullName, t0, per_replication)
+        r = resultsmod.read(m.FullName, t0, per_replication, text_only=legacy)
         res["results_source"] = r["source"]
         res["statistics"] = r["statistics"]
         if r.get("note"):
             res["results_note"] = r["note"]
         if legacy and r["source"] is None and not res["errors"]:
-            res["errors"].append({"level": "error", "message": "Arena 14 did not write a fresh SIMAN text report"})
+            res["errors"].append({"level": "error", "message": "Arena 14 did not write a fresh SIMAN text report with statistics"})
     lic = resultsmod.report_license(m.FullName)
     if lic:  # the text report names the license ("STUDENT"); remember it, it tells Student from lab licenses apart
         res["report_license"] = lic

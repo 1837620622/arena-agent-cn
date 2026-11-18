@@ -12,6 +12,7 @@ derive it from the printed replication values.
 """
 import math
 import os
+from pathlib import Path
 import sqlite3
 import re
 import statistics
@@ -44,7 +45,7 @@ def summarize(values):
 def read_db(path, per_replication=False):
     """{"Examination.Queue.Waiting Time": {"kind", "source", "average", "half_width", "min", "max", "n"}, ...}
     from the report database at path. Only the latest run in the database is used."""
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
     try:
         res = {}
         for view, col, k in VIEWS:
@@ -77,23 +78,38 @@ def drop_empty(res):
     return {k: v for k, v in res.items() if not (v["n"] == 0 or (v["kind"] == "tally" and v["average"] is None))}
 
 
-def read(model_path, since=0, per_replication=False, include_empty=False):
+def read(model_path, since=0, per_replication=False, include_empty=False, *, text_only=False):
     base = os.path.splitext(model_path)[0]
-    db = base + ".db"
-    if os.path.exists(db) and os.path.getmtime(db) >= since:
+    candidates = []
+    for suffix in ((".out",) if text_only else (".db", ".out")):
+        path = base + suffix
         try:
-            res = read_db(db, per_replication)
+            modified = os.stat(path).st_mtime
+        except FileNotFoundError:
+            continue
+        if modified >= since:
+            candidates.append((suffix, path, modified))
+    if not since:
+        # 离线复读优先取最近写出的报告；时间相同时保留 SQLite 的精度。
+        candidates.sort(key=lambda item: item[2], reverse=True)
+    for suffix, path, _ in candidates:
+        if suffix == ".db":
+            try:
+                res = read_db(path, per_replication)
+            except sqlite3.DatabaseError:
+                continue
             if res:
-                return {"source": db, "statistics": res if include_empty else drop_empty(res)}
-        except sqlite3.DatabaseError:
-            pass  # not SQLite (older Arena): fall back to the text report
-    out = base + ".out"
-    if os.path.exists(out) and os.path.getmtime(out) >= since:
-        with open(out, errors="replace") as report:
-            stats = text_statistics(report.read(), per_replication)
-        return {"source": out, "statistics": stats,
-                "note": "from the SIMAN text report, with native labels and printed precision"}
-    return {"source": None, "statistics": {}, "note": "no results from this run (no .db or .out written)"}
+                return {"source": path, "statistics": res if include_empty else drop_empty(res)}
+        else:
+            try:
+                with open(path, errors="replace") as report:
+                    stats = text_statistics(report.read(), per_replication)
+            except FileNotFoundError:
+                continue
+            if stats:
+                return {"source": path, "statistics": stats,
+                        "note": "from the SIMAN text report, with native labels and printed precision"}
+    return {"source": None, "statistics": {}, "note": "no readable report with statistics for this run"}
 
 
 def report_license(model_path):

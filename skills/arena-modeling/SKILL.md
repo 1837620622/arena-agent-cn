@@ -10,7 +10,7 @@ description: 在 Windows 上使用 Rockwell Arena 14 或 16 构建、修改和�
 ## 接入与版本
 
 - 先调用 `arena_status`，或执行 `arena-agent info`，查看当前 COM 版本、许可状态和兼容模式。连接失败时运行 `arena-agent doctor`。
-- Arena 14.x 批跑默认读取原生 SIMAN `.out`。Arena 16.x 优先读取 SQLite `.db`。不同版本的模板字段以 `module_operands` 和 `template_reference` 为准。
+- Arena 14 是当前的原生验收重点。批跑从本轮 SIMAN `.out` 取统计，离线回读按报告最后写入时间选择。Arena 16.x 批跑优先读取 SQLite `.db`。不同版本的模板字段以 `module_operands` 和 `template_reference` 为准。
 - 如果许可状态未知且会影响建模规模，再确认使用的是学生版还是完整许可。遇到 `edition_limit_exceeded` 时准确指出限制并调整模型规模。
 
 ## 建模与验收
