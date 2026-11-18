@@ -506,6 +506,9 @@ def run_setup(m):
 def apply_run_setup(m, setup, report):
     """setup: {"replications", "replication_length", "replication_length_units", "warm_up", "warm_up_units",
     "base_time_units", "hours_per_day", "terminating_condition"}; units are days|hours|minutes|seconds."""
+    if setup and not isinstance(setup, dict):
+        report["errors"].append(f"run setup must be an object of field: value, not {type(setup).__name__}")
+        return
     for k, v in (setup or {}).items():
         if k not in SETUP_PROPS:
             report["errors"].append(f"run setup: unknown field {k!r} (valid: {sorted(SETUP_PROPS)})")
@@ -838,7 +841,10 @@ def build(a, spec):
             existing[name] = mod
         collect(items, module_type)
     for u in spec.get("updates") or []:
-        collect(expand(u), kind(existing[u.get("name")]) if u.get("name") in existing else "")
+        try:
+            collect(expand(u), kind(existing[u.get("name")]) if u.get("name") in existing else "")
+        except ArenaError:
+            continue  # a row this template cannot take was already reported when the update was applied
     for what in DECLARERS:  # names nothing declared yet, from the same grid cursor
         declare(a, m, existing, found[what], what, cursor, report)
     for k, mod in existing.items():  # connections may name existing modules too
@@ -1187,12 +1193,20 @@ def _run_batch_locked(m, ended_first, show, outputs, per_replication, legacy):
 
 def _apply_in_memory(m, changes, report):
     """changes: {module: {operand: value}}. Returns the previous values, to restore after the run."""
+    if changes and not isinstance(changes, dict):
+        report["errors"].append({"level": "error",
+                                 "message": f"changes must be {{module: {{operand: value}}}}, not {type(changes).__name__}"})
+        return {}
     byname = modules_by_name(m)
     old = {}
     for module, data in (changes or {}).items():
         mod = byname.get(module)
         if mod is None:
             report["errors"].append({"level": "error", "message": f"set: no module named {module!r}"})
+            continue
+        if not isinstance(data, dict) or not data:
+            report["errors"].append({"level": "error",
+                                     "message": f"set: give at least one operand for {module!r}, as {{operand: value}}"})
             continue
         for k, v in data.items():
             old[(module, k)] = getdata(mod, k)
@@ -1240,8 +1254,13 @@ def scenarios(a, model, cases, reps=None, setup_fields=None, show=None, measures
     {operand: value}}, "reps", "run_setup"}. Returns one result per case; measures limits outputs to those
     statistics (substring match, case-insensitive)."""
     out = []
+    if not isinstance(cases, list):
+        raise ArenaError('cases must be a list of scenarios: [{"name": ..., "changes": {module: {operand: value}}}]')
     for c in cases:
-        r = run(a, model, reps=c.get("reps", reps), setup_fields={**(setup_fields or {}), **c.get("run_setup", {})},
+        if not isinstance(c, dict):
+            raise ArenaError(f"each scenario must be an object with name/changes; got {c!r}")
+        r = run(a, model, reps=c.get("reps", reps),
+                setup_fields={**(setup_fields or {}), **(c.get("run_setup") or {})},
                 changes=c.get("changes"), show=c.get("show", show))
         if measures:
             r["statistics"] = {k: v for k, v in r.get("statistics", {}).items()

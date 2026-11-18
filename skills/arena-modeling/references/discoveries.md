@@ -674,6 +674,13 @@ report's printed precision.
   which reports it), `plan_layout(..., skip=...)` leaves them out of the drawing, and each of them without x/y takes
   the next cell of the same declaration grid as the auto-declared names.
 
+### 72. 运行参数不是对象时的报错
+- **Finding (code):** `scenarios` unpacked `c.get("run_setup", {})` and `_apply_in_memory` unpacked each module's
+  `data`; a `null` in either place raised TypeError/AttributeError after the model was already open, and a cases file
+  holding one object instead of a list failed with "str object has no attribute get".
+- **Change:** `scenarios` requires a list of objects, `apply_run_setup` and `_apply_in_memory` report a bad shape in
+  `errors` and carry on, and a `null` run_setup or empty operand map is treated as "nothing to change".
+
 ## Open items (to try next)
 
 - Lint `AQUE`/`SAQUE`/`AG`/`SAG`/`ATTR` calls for a bare attribute name (22).

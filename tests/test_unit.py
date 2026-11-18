@@ -143,6 +143,19 @@ def test_data_module_keys_ignores_an_unknown_type():
     assert core.data_module_keys(app, spec) == {"r"}
 
 
+def test_run_setup_rejects_a_non_object():
+    report = {"errors": []}
+    core.apply_run_setup(SimpleNamespace(), ["replications"], report)  # a list used to raise AttributeError
+    assert "object" in report["errors"][0]
+
+
+def test_scenarios_reject_a_case_list_that_is_not_a_list():
+    with pytest.raises(core.ArenaError, match="list of scenarios"):
+        core.scenarios(None, "m.doe", {"name": "one"})  # a single object in the cases file
+    with pytest.raises(core.ArenaError, match="each scenario"):
+        core.scenarios(None, "m.doe", ["one"])
+
+
 def test_plan_layout_survives_a_bad_layout_block():
     spec = {"modules": [{"id": "a"}, {"id": "b"}], "connections": [{"from": "a", "to": "b"}],
             "layout": {"dx": "wide"}}
