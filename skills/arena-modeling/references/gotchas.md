@@ -22,6 +22,9 @@ Background and evidence for each: `arena_guide("discoveries")`.
    and then silently deleted by check (reported as `dropped_connections`). Use the spec's `exit` names.
 6. **Arena adds data modules by itself**: Create -> Entity (renamed to the spec's entity type), ReadWrite -> `File 1`
    (fails check until edited; delete it with the spec's `delete`), Hold/Search -> a queue, Batch -> `<name>.Queue`.
+   Names the tools declare themselves are placed in a 6-wide grid from `declare_at` (Attribute, Variable, Queue,
+   Resource, Entity share one cursor), because several data modules created at one point pile up and read as one
+   unreadable block in the flowchart and in every export.
 7. **Changing a Hold's queue settings can drop its incoming connections.** Re-check after editing a Hold.
 8. **View coordinates are 16-bit.** Modules can be placed anywhere through COM, but the GUI only shows -32,768..32,767.
    Keep layouts inside +-32,000; compress spacing for big models.
@@ -57,10 +60,15 @@ Background and evidence for each: `arena_guide("discoveries")`.
     builds on the same file from a background shell at the same time.
 20. **Screenshots capture the Arena drawing pane.** Open Arena in a Windows desktop session. The exporter captures
     the native drawing window so taskbar, cursor overlays and other desktop panels do not enter the tiled image.
-    For readable details, set `region` to the section bounds and raise `pixels_per_unit` until the labels are legible.
-    Leave a margin around the outer modules and their connectors. Inspect tiled images at 100% for broken lines at
-    the joins and for labels that Arena wraps against a module border. Shorten a crowded label if its full text
-    will not fit, then check any references and rerun the model.
+    The default region is the flowchart modules plus the text shapes within 5,000 units of them, so section titles are
+    part of the image and a stray shape far away is ignored; a model that only declares names is exported from its
+    data modules. Without `pixels_per_unit` the scale is never below Arena's current zoom: a region that fits one pane
+    at that scale is one image, a bigger one is tiled up to `max_tiles` (64), and only a region too large even for
+    that many tiles is scaled down; `pixels_per_unit` forces an exact scale. For readable details, set `region` to the
+    section bounds and raise `max_tiles` rather than lowering the scale — and zoom Arena in before exporting, since
+    the export follows the zoom. Leave a margin around the outer modules and their connectors. Inspect tiled images at
+    100% for broken lines at the joins and for labels that Arena wraps against a module border. Shorten a crowded
+    label if its full text will not fit, then check any references and rerun the model.
 21. Arena's report database is `<model>.db` (SQLite in Arena 16+), the text report `<model>.out`, errors `<model>.err`
     (binary; arena-agent decodes it and maps each record to its module).
 
@@ -85,3 +93,12 @@ Background and evidence for each: `arena_guide("discoveries")`.
 - The first screenshot tile after opening some Arena 14 named views can jump to twice the requested world coordinates.
   `screenshot_model` checks that the displayed area covers the requested tile and retries before capturing. If the
   view still misses the tile, it reports the affected region.
+- Animation frames: `capture_animation_frame` plays and pauses at one simulation time (`BreakOnTime`);
+  `capture_animation_frames` repeats it for a list of increasing times. Arena 14 cannot resume a paused animation
+  through COM, so every frame replays the run from zero — sample 5 to 8 key moments (start, first queue, steady
+  state, a status switch, the end) rather than a dense series. When a run cannot reach the time, lower `speed` so the
+  tool has time to set the breakpoint, and raise `timeout` for long runs. A visible jump between two frames is either
+  a model event (a resource turning busy, a batching release) or too coarse a time step: compare the printed clock in
+  both frames before blaming playback.
+- The flowchart pane is normally `Afx:…:8:…`; where a build numbers it differently the exporter takes the largest
+  visible `Afx:` child that is not the spreadsheet (`AfxFrameOrView…`).

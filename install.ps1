@@ -72,7 +72,8 @@ if ($UpdateOnly) {
 # 3. register with the AI clients on this machine
 Say 'Connecting arena-agent to your AI tools'
 if ($env:ARENA_AGENT_CLIENTS) {
-    & $exe install --client $env:ARENA_AGENT_CLIENTS.Split(' ')
+    $clientList = @($env:ARENA_AGENT_CLIENTS.Split(' ') | Where-Object { $_ })
+    & $exe install --client $clientList
 } else {
     & $exe install
 }

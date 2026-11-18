@@ -17,6 +17,7 @@
 ## 原生排版、字体和成品交付
 
 - 先依题目和本机《Getting Started with Arena》里的二维动画、资源和 Navigate 示例划分流程与动画区域。主流程统一阅读方向，绕行和回程独立走线。命名视图按功能区域和阅读顺序设置，整图与关键局部都应可读。 [Rockwell Arena 官方课程](https://www.rockwellautomation.com/en-mde/products/software/arena-simulation/support/training/course-agenda.html)
+- 排版在建模规格里定：没写坐标的模块按连接图排布，`layout` 调 `dx`、`dy`、`columns`；标题用 `shapes.level`（`title`、`section`、`note`）统一层级；分区用 `views` 保存命名视图。导图缺省按 Arena 当前缩放分块，模型大可调高 `max_tiles`，不要靠降比例换整图。
 - 同一图中标题、区域标签、统计值和注释使用一致的字体层级。英文可用系统 Arial 或 Segoe UI，中文按任务要求选本机可显示的中文字体。轨迹与业务文字分离，状态文字避免覆盖连线和图标。轴、时间、长度、速率等标明单位，用足够的前景和背景反差。图中文字的可读性可参考 4.5:1 的对比度基准，字号以最终 PNG 或视频在实际观看尺寸下清楚为准。 [W3C 文字对比度参考](https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum)
 - 逐张打开导出的 PNG 和矢量图，核对标签、数字、单位、图例、边缘和拼接处。区域截面上的跨区连线要能通过相邻视图或整图追踪。原生对话框截短长表达式时，保留原截图，在旁边补充从模型读回的完整字段，按运算边界换行。
 - DOE、图纸、截图和视频只呈现任务相关信息。交付清单按任务书及用户范围核对。没有交付要求的临时脚本、JSON、日志、工具标记和第三方水印留在成品包之外。对 ZIP 做 CRC 校验、解压逐文件比对和原生复开。仓库提交只包含工具和公开可复现的测试。

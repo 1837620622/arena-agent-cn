@@ -33,9 +33,12 @@ one, sets every module, declares the names they use, connects them, compiles and
     {"from": "route", "to": "other", "exit": "else"}
   ],
   "declare": {"attributes": ["Acuity"], "variables": []},  // extra names only READ in expressions
-  "declare_at": [0, -4000],                                // where auto-declared data modules are placed
+  "declare_at": [0, -4000],                                // where the auto-declared data modules start (a 6-wide grid)
   "delete": ["File 1"],                                    // stray modules to remove (see auto_created)
-  "shapes": [{"text": "Triage", "x": 0, "y": -1500}],     // optional titles on the flowchart
+  "layout": {"dx": 2600, "dy": 1800, "columns": 12},       // spacing of modules built without x/y
+  "shapes": [{"text": "Triage", "x": 0, "y": -1500, "level": "title"}],   // titles on the flowchart
+  "views": [{"name": "MAIN", "modules": ["arrive", "exam"], "margin": 600},
+            {"name": "DETAIL", "region": [-500, -500, 7000, 2500]}],      // saved named views to export
   "check": true                                            // compile at the end (default)
 }
 ```
@@ -53,7 +56,22 @@ one, sets every module, declares the names they use, connects them, compiles and
 - `id` is how connections refer to the module; connections can also name existing modules by their Name.
 - `x`, `y`: model units. Keep every module inside -32,000..32,000 (Arena's view coordinates are 16-bit; modules
   outside can never be seen in the GUI). A spacing of ~2,000-2,500 between modules in a row reads well.
+- A module with no `x`/`y` is placed from the connection graph: one column right of the module that feeds it,
+  branches stacked and centred around the main row, long chains wrapped into bands. `layout` tunes it (`dx`, `dy`,
+  `columns` per band, `origin`); the default 2600 x 1800 leaves room for labels and route lines. Extending a model
+  (`base`) puts the new band below the existing flowchart, or beside it when below would leave Arena's +-30,000 view.
 - Data modules (Resource, Variable, Queue, Entity, Attribute, Expression, Statistic, Schedule ...) need no x/y.
+  Names declared automatically are laid out in a 6-wide grid from `declare_at`, so they never stack on one point.
+
+## Titles and named views
+
+- `shapes` writes flowchart text. `level` picks one type hierarchy for the whole drawing: `title` (700 model units),
+  `section` (480, the default) and `note` (320); `height` overrides it, and `font`, `angle`, `italic`, `underline`,
+  `bold` are passed to Arena. Keep one font for the drawing (Arial or Segoe UI) and one level per kind of label.
+- `views` saves named views, which is what `list_named_views` reports and `screenshot_model` exports by name: give
+  either `region` as `[x0, y0, x1, y1]` or `modules` (ids or Names) plus `margin` (default 600) and the bounds are
+  computed from the real module shapes. Plan one view per business section, plus the animation and return path.
+  The build result lists what was created under `views`; a missing module or a bad region is reported in `errors`.
 
 ## Exits
 

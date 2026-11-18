@@ -1,6 +1,6 @@
 {
   "name": "arena-agent",
-  "version": "0.2.2",
+  "version": "0.2.6",
   "description": "Rockwell Arena 离散事件仿真建模、运行、验收和导图",
   "author": {"name": "传康Kk"},
   "homepage": "https://github.com/1837620622/arena-agent-cn",

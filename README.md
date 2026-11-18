@@ -10,8 +10,8 @@
 | 原生建模 | 读取 Arena 模板和模块字段，按规格创建模块和连接，或基于已有模型另存 | 可编辑 DOE、模型参数、原生连线和布局警告 |
 | 原生仿真 | 检查模型，跑指定重复次数，应用并恢复方案参数 | 仿真是否完成、终止时刻、模型基本时间单位、原生报告路径和统计值 |
 | 报表和方案对比 | 读取 Arena 14 本次 SIMAN 文本报告，读回 Arena 16 SQLite 同一轮统计，支持逐次重复 | 统计项、重复值、均值和原生报告提供的置信区间半宽 |
-| 流程图 | 按模块范围、矩形或命名视图导出，编辑态支持分块和高分辨率 | PNG、尺寸、范围、拼接块数和捕获方式 |
-| 二维动画截图 | 已暂停时抓取当前帧，或在 Arena 14 中自动播放到指定时刻并导出 | 原生 PNG、命名视图、像素尺寸，以及自动运行实际到达的仿真时刻 |
+| 流程图 | 按模块范围、矩形或命名视图导出；缺省按 Arena 当前缩放分块，块数上限可调 | PNG、尺寸、范围、拼接块数、实际比例和捕获方式 |
+| 二维动画截图 | 已暂停时抓取当前帧，或在 Arena 14 中自动播放到指定时刻导出，可按多个时刻成组导出 | 原生 PNG、命名视图、像素尺寸，以及自动运行实际到达的仿真时刻 |
 
 ## Arena 版本
 
@@ -84,7 +84,7 @@ arena-agent results bank.doe --per-rep
 Arena 14 批跑以本轮原生 `.out` 中的统计为准。`results` 离线回读时，从已有的可读报告中按最后写入时间选取最新结果。
 SQLite 统计在同一次读事务内按最新运行汇总，支持读取尚未合并到主文件的已提交日志。
 
-导出整图可在验收时加 `--png`。模型已保存命名视图时，可读取视图列表，按实际名称导出分区图。在编辑态可调 `--ppu` 提高文字和连线分辨率，导出后恢复绘图视野和分屏设置。动画截图先在 Arena 中显示整个目标区域并暂停，工具从当前绘图区截取同一帧。导图需要有桌面的 Windows 会话。
+导出整图可在验收时加 `--png`。不给 `--ppu` 时导出比例不低于 Arena 当前缩放（屏幕上文字和连线的大小）：区域能在一块绘图区内按接近该比例显示时正好拼成一块，较大时按屏幕比例分块拼接。块数上限用 `--tiles` 调整（缺省 64），只有超出上限才等比缩小。模型已保存命名视图时，可读取视图列表，按实际名称导出分区图。导出后恢复绘图视野和分屏设置。动画截图先在 Arena 中显示整个目标区域并暂停，工具从当前绘图区截取同一帧。导图需要有桌面的 Windows 会话。
 
 ```powershell
 arena-agent validate bank.doe --reps 3 --png bank.png
@@ -100,6 +100,7 @@ arena-agent screenshot existing.doe upstream.png --view "ARRIVAL_UPSTREAM" --ppu
 | `run_model` / `run_scenarios` / `get_results` | 批跑、比较方案和读取结果，支持逐次重复 |
 | `list_named_views` / `screenshot_model` | 列出命名视图，导出整图或指定分区 |
 | `capture_animation_frame` | Arena 14 原生播放并跳停在指定仿真时刻，保存一张 PNG |
+| `capture_animation_frames` | 同上，按多个递增时刻成组导出，用于核对运动是否连贯 |
 
 建模参数参考 [JSON 规格](skills/arena-modeling/references/build-spec.md)。大模型先按业务环节划分命名视图，原生检查通过后导出总图和细节图，并以 100% 比例核对字号、模块边缘和分支连线。Arena 14 的报表弹窗、视口拼接和权限排查见 [兼容性说明](skills/arena-modeling/references/gotchas.md)。
 
@@ -110,6 +111,7 @@ arena-agent screenshot existing.doe upstream.png --view "ARRIVAL_UPSTREAM" --ppu
 ```powershell
 arena-agent views "E:\work\animation.doe"
 arena-agent animation-frame "E:\work\animation.doe" "E:\work\at80.png" --view "ANIMATION" --time 80
+arena-agent animation-frames "E:\work\animation.doe" "E:\work\frames" --view "ANIMATION" --time 0 20 40 60 80
 ```
 
 MCP 的同一操作接受下列参数。
@@ -128,7 +130,18 @@ MCP 的同一操作接受下列参数。
 - `simulation_time` 使用模型的基本时间单位。模型必须在此次重复中能到达指定时刻。非常靠近零的时刻可降低 `speed`，让工具有时间设置断点。
 - `speed` 是 Arena 的播放速度设置，`timeout` 是墙钟等待时间（秒）。模型已有活动运行时先结束原运行。自动截图完成后结束这次临时运行并恢复选项。
 - 需要保留当前动画状态时，先在 Arena 中显示完整目标视图并暂停，再调用 `screenshot_model`。暂停态使用原生单帧，保持当前视野。需要更大分辨率时先增大可用绘图区。
+- `capture_animation_frames` 按递增时刻成组导出。Arena 14 的暂停不能通过 COM 续播，每一帧都从零重放一次，所以取 5 到 8 个关键时刻（起始、首次排队、稳态、状态切换、结束）比抓几十帧更能看出运动是否连贯。相邻两帧之间出现跳跃时，先比对两帧上的仿真时钟，再判断是模型事件还是播放丢帧。
 - MP4 录制采用现场播放并编码的方式。可在 Windows 上用 Python/COM 控制 Arena、捕获绘图区，再用 FFmpeg 编码。在抛出异常、段落切换和实际匀速播放处核对运动，最终对 MP4 全片解码，检查黑帧、录制窗口遮挡及模拟时钟变化。连续视频编码目前由外部录制流程完成，MCP 直接提供的是原生 PNG。
+
+## 排版、字体与出图
+
+排版先在建模规格里定好，再靠导图核对，顺序比事后修图省事。
+
+- **位置**：没有写 `x`、`y` 的模块按连接图排布——跟着上游模块向右一列，分支上下居中，长链折行成带；`layout` 可调 `dx`、`dy`、`columns`、`origin`（缺省 2600 x 1800，12 列一带）。显式坐标优先，仍受 ±32,000 的视图范围限制。工具自动声明的属性、变量、队列、资源和实体类型按 6 列网格从 `declare_at` 排开，不会叠成一团。
+- **字号层级**：`shapes` 的 `level` 提供三级：`title`（700 模型单位）、`section`（480，缺省）、`note`（320），`height` 可覆盖；`font`、`angle`、`italic`、`underline`、`bold` 直传 Arena。同一张图只用一种字体（Arial 或 Segoe UI）和一套层级，标题、区域名、注释不要混用字号。
+- **命名视图**：`views` 按业务区域保存视图，给 `modules` 就按真实模块边界加 `margin` 计算，给 `region` 就用给定矩形。导图按视图名导出，分区图与整图都能对上同一块区域。
+- **导图比例**：缺省区域是流程图模块加上附近 5,000 单位内的文字标题，远处孤立的图形不计入，只有声明没有流程图模块时按数据模块导出。缺省比例不低于 Arena 当前缩放，导图前先把 Arena 缩放到要交付的清晰度；区域大就提高 `max_tiles`（命令行 `--tiles`）分块拼接，只有块数超过上限才按比例降一档，不要靠降比例换整图。显式给 `pixels_per_unit` 时严格照办，超出块数或单张 1.2 亿像素上限会直接报错。缩小用 LANCZOS 保笔画，放大用 BICUBIC 防锯齿。
+- **核对**：按最终观看尺寸逐张看 PNG，检查标签、单位、遮挡、边缘和拼接处；区域截面上的跨区连线要能通过相邻视图或整图追踪。原生对话框截短长表达式时，在截图旁补充从模型读回的完整字段。
 
 ## 验证边界与常见问题
 

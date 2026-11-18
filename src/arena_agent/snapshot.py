@@ -22,6 +22,9 @@ MOVING_STATES = {13, 14, 15}  # smStateRunning, smStateStepping, smStateFastForw
 RUN_FRAME_STATES = {8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 21}
 ES_CONTINUOUS = 0x80000000
 ES_DISPLAY_REQUIRED = 0x00000002
+MAX_PIXELS = 120_000_000  # one PNG: keeps a wrong pixels_per_unit from exhausting memory
+MAX_SIDE = 30_000
+SHAPE_REACH = 5000  # a text shape further than this from the flow is not part of the exported region
 
 
 def _dpi_aware():
@@ -39,43 +42,86 @@ def area(r):
     return max(0, r[2] - r[0]) * max(0, r[3] - r[1])
 
 
+def _class_name(h):
+    return safe(lambda: win32gui.GetClassName(h), "")
+
+
+def _title_matches(title, model_name):
+    """Arena appends " - Run Mode" while the animation runs and " *" to a model with unsaved changes (both at once
+    while a changed model is playing)."""
+    text = (title or "").strip()
+    stripped = True
+    while stripped:
+        stripped = False
+        for suffix in (" - Run Mode", " *"):
+            if text.endswith(suffix):
+                text = text[: -len(suffix)].rstrip()
+                stripped = True
+    return text == model_name
+
+
 def model_window(model_name):
     """定位 m.Activate() 选中的 MDI 文档，兼容动画运行时的窗口标题。"""
     tops = []
-    win32gui.EnumWindows(lambda h, _: tops.append(h) if win32gui.GetClassName(h) == "SMX:Arena"
+    win32gui.EnumWindows(lambda h, _: tops.append(h) if _class_name(h) == "SMX:Arena"
                          and win32gui.IsWindowVisible(h) else None, None)
     for top in tops:
         mdi = win32gui.FindWindowEx(top, 0, "MDIClient", None)
         if not mdi:
             continue
         child = win32gui.SendMessage(mdi, win32con.WM_MDIGETACTIVE, 0, 0)
-        if not child or win32gui.GetClassName(child) != "SMX:Model":
+        if not child or _class_name(child) != "SMX:Model":
             continue
-        if win32gui.GetWindowText(child) not in (model_name, f"{model_name} - Run Mode"):
+        if not _title_matches(win32gui.GetWindowText(child), model_name):
             continue
         panes = []
         win32gui.EnumChildWindows(child, lambda h, _: panes.append(h), None)
-        # 绘图区使用 Afx:…:8:…，与表格视图的 AfxFrameOrView140 不同。
-        panes = [p for p in panes if win32gui.GetClassName(p).startswith("Afx:") and ":8:" in
-                 win32gui.GetClassName(p) and win32gui.IsWindowVisible(p)]
-        if panes:
-            return top, child, max(panes, key=lambda p: area(client_rect(p)))
+        panes = [p for p in panes if _class_name(p).startswith("Afx:") and win32gui.IsWindowVisible(p)]
+        # 绘图区使用 Afx:…:8:…，与表格视图的 AfxFrameOrView140 不同；个别版本编号不同，按类名排除表格视图。
+        flowchart = [p for p in panes if ":8:" in _class_name(p)] or [
+            p for p in panes if "AfxFrameOrView" not in _class_name(p)]
+        if flowchart:
+            return top, child, max(flowchart, key=lambda p: area(client_rect(p)))
     raise ArenaError(f"no visible Arena window for model {model_name!r}")
 
 
-def modules_bbox(m):
-    xs0, ys0, xs1, ys1 = [], [], [], []
+def _shape_box(shape):
+    """(x0, y0, x1, y1) of a module or text shape, or None when the object reports no bounds."""
+    left, right = safe(lambda: shape.Left), safe(lambda: shape.Right)
+    top, bottom = safe(lambda: shape.Top), safe(lambda: shape.Bottom)
+    if None in (left, right, top, bottom):
+        return None
+    return min(left, right), min(top, bottom), max(left, right), max(top, bottom)
+
+
+def _union(boxes):
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+def content_bbox(m):
+    """Bounds of what the flowchart shows: the modules together with the text shapes near them, so the default export
+    does not cut off a section title. A shape far from the flow (a stray frame) is ignored, and a model that only
+    declares names falls back to its data modules."""
+    flowchart, data = [], []
     for i in range(1, m.Modules.Count + 1):
         md = m.Modules.Item(i)
-        if safe(lambda: md.Definition.DataModule, True):
+        box = _shape_box(safe(lambda: md.shape))
+        if box is None:
             continue
-        sh = safe(lambda: md.shape)
-        if sh is None:
-            continue
-        xs0.append(sh.Left), ys0.append(sh.Top), xs1.append(sh.Right), ys1.append(sh.Bottom)
-    if not xs0:
+        (data if safe(lambda: md.Definition.DataModule, True) else flowchart).append(box)
+    if not flowchart:
+        flowchart = data
+    if not flowchart:
         raise ArenaError("the model has no flowchart modules to show")
-    return min(xs0), min(min(ys0), min(ys1)), max(xs1), max(max(ys0), max(ys1))
+    x0, y0, x1, y1 = _union(flowchart)
+    titles = [_shape_box(safe(lambda: m.Shapes.Item(i)))
+              for i in range(1, (safe(lambda: m.Shapes.Count, 0) or 0) + 1)]
+    for box in titles:
+        if box and box[0] >= x0 - SHAPE_REACH and box[2] <= x1 + SHAPE_REACH \
+                and box[1] >= y0 - SHAPE_REACH and box[3] <= y1 + SHAPE_REACH:
+            flowchart.append(box)
+    return _union(flowchart)
 
 
 def _zoom_for_tile(view, requested, needed):
@@ -115,6 +161,23 @@ def _view_bounds(view):
     return view.Left, view.Top, view.Right, view.Bottom
 
 
+def _native_ppu(view, pw, ph):
+    """屏幕像素/模型单位：Arena 当前缩放下的原生比例。按它出图不缩放，文字和连线与屏幕一样清晰。"""
+    left, top, right, bottom = _view_bounds(view)
+    width, height = abs(right - left), abs(bottom - top)
+    if width <= 0 or height <= 0 or pw <= 0 or ph <= 0:
+        return None
+    return min(pw / width, ph / height)
+
+
+def _resample(img, size):
+    """缩小用 LANCZOS 保住笔画，放大用 BICUBIC 避免锯齿；尺寸相同就不动图。"""
+    if img.size == size:
+        return img
+    shrinking = size[0] <= img.width and size[1] <= img.height
+    return img.resize(size, Image.Resampling.LANCZOS if shrinking else Image.Resampling.BICUBIC)
+
+
 @contextmanager
 def _export_view(view, top, child):
     settings = {prop: safe(lambda: getattr(view, prop)) for prop in VIEW_SETTINGS}
@@ -151,9 +214,15 @@ def _export_view(view, top, child):
 
 def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64, *, view_name=None):
     """Write a PNG of the flowchart by named view or rectangle (default: all flowchart modules).
-    ppu: screen pixels per model unit; default fits the region into one screen (readable for small models)."""
+    ppu: screen pixels per model unit. Default: never below Arena's current zoom — a region that fits one pane at
+    that scale is one image, a larger one is tiled up to max_tiles, and only a region too big even for that many
+    tiles is exported at a lower resolution."""
     if view_name is not None and region is not None:
         raise ArenaError("choose view_name or region")
+    out_path = os.path.abspath(out_path)
+    if os.path.splitext(out_path)[1].lower() != ".png":
+        raise ArenaError("screenshot output must end in .png")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)  # a new export folder should not fail the export
     _dpi_aware()
     m = open_model(a, model)
     state = safe(lambda: m.State)
@@ -166,6 +235,12 @@ def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64, *, view_na
         region = views[view_name]
     if ppu is not None and (not math.isfinite(ppu) or ppu <= 0):
         raise ArenaError("screenshot pixels per unit must be positive and finite")
+    try:
+        max_tiles = int(max_tiles)
+    except (TypeError, ValueError):
+        raise ArenaError("screenshot max_tiles must be a whole number")
+    if max_tiles < 1:
+        raise ArenaError("screenshot max_tiles must be at least 1")
     if region is not None:
         if len(region) != 4 or not all(math.isfinite(float(value)) for value in region):
             raise ArenaError("screenshot region must contain four finite coordinates")
@@ -173,7 +248,7 @@ def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64, *, view_na
         if not (region[0] < region[2] and region[1] < region[3]):
             raise ArenaError("screenshot region must have increasing x and y bounds")
     elif state not in RUN_FRAME_STATES:
-        X0, Y0, X1, Y1 = modules_bbox(m)
+        X0, Y0, X1, Y1 = content_bbox(m)
         mg = 400
         region = (X0 - mg, Y0 - mg, X1 + mg, Y1 + mg)
     a.Visible = True
@@ -182,13 +257,13 @@ def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64, *, view_na
     top, child, pane = model_window(m.Name)
     if state in RUN_FRAME_STATES:
         canvas, region = _capture_run_frame(v, pane, region, ppu)
-        tiles = 1
+        tiles, used_ppu = 1, ppu
     else:
         with _export_view(v, top, child):
-            canvas, tiles = _capture_tiles(v, pane, region, ppu, max_tiles)
-    out_path = os.path.abspath(out_path)
+            canvas, tiles, used_ppu = _capture_tiles(v, pane, region, ppu, max_tiles)
     canvas.save(out_path)
     return {"out": out_path, "size": list(canvas.size), "tiles": tiles, "region": list(region),
+            "pixels_per_unit": round(used_ppu, 4) if used_ppu else None,
             **({"view_name": view_name} if view_name is not None else {}),
             "capture": "arena_flowchart_window"}
 
@@ -219,8 +294,7 @@ def _capture_run_frame(view, pane, region, ppu):
         size = (max(1, round((x1 - x0) * ppu)), max(1, round((y1 - y0) * ppu)))
         if size[0] > image.width or size[1] > image.height:
             raise ArenaError("the paused animation can only be exported at its on-screen resolution or smaller")
-        if image.size != size:
-            image = image.resize(size, Image.Resampling.LANCZOS)
+        image = _resample(image, size)
     return image, region
 
 
@@ -230,14 +304,33 @@ def _capture_tiles(v, pane, region, ppu, max_tiles):
     pw, ph = pr[2] - pr[0], pr[3] - pr[1]
     if pw <= 0 or ph <= 0:
         raise ArenaError("the Arena flowchart pane is not visible")
+    if ppu is not None and not (math.isfinite(ppu) and ppu > 0):
+        raise ArenaError("screenshot pixels per unit must be positive and finite")
+    span_x, span_y = max(X1 - X0, 1.0), max(Y1 - Y0, 1.0)
+    auto_scale = ppu is None
     if ppu is None:
-        ppu = min(pw / (X1 - X0), ph / (Y1 - Y0)) * 0.9  # one tile
-    tw, th = pw / ppu * 0.92, ph / ppu * 0.92  # tile step in world units (8% overlap)
-    nx, ny = max(1, math.ceil((X1 - X0) / tw)), max(1, math.ceil((Y1 - Y0) / th))
-    if nx * ny > max_tiles:
-        raise ArenaError(f"{nx * ny} tiles needed at ppu={ppu}; lower ppu or pick a smaller region")
-    W = max(1, round((X1 - X0) * ppu))
-    H = max(1, round((Y1 - Y0) * ppu))
+        # 区域能在一整块绘图区内以接近当前缩放的比例显示时用这个比例（正好拼成一块）；否则按当前缩放分块拼接。
+        # 缺省比例在块数和内存上限内自适应，显式给的比例则严格照办，超出就报错。
+        native = _native_ppu(v, pw, ph)
+        fit = min(pw / span_x, ph / span_y) * 0.9  # *0.9 让整个区域落在一块绘图区内
+        ppu = fit if native is None or fit >= native * 0.9 else native
+    if not (math.isfinite(ppu) and ppu > 0):
+        raise ArenaError("the Arena flowchart pane reports no scale; pass pixels_per_unit")
+    if auto_scale:
+        ppu = min(ppu, math.sqrt(MAX_PIXELS / (span_x * span_y)), MAX_SIDE / max(span_x, span_y))  # 内存上限内取最大
+    for _ in range(3):
+        tw, th = pw / ppu * 0.92, ph / ppu * 0.92  # tile step in world units (8% overlap)
+        nx, ny = max(1, math.ceil(span_x / tw)), max(1, math.ceil(span_y / th))
+        W, H = max(1, round(span_x * ppu)), max(1, round(span_y * ppu))
+        if W * H > MAX_PIXELS or max(W, H) > MAX_SIDE:
+            raise ArenaError(f"{W} x {H} px is too large for one PNG; lower pixels_per_unit or pick a smaller region")
+        if nx * ny <= max_tiles:
+            break
+        if not auto_scale:
+            raise ArenaError(f"{nx * ny} tiles are needed at ppu={ppu:g}; raise max_tiles or lower pixels_per_unit")
+        ppu *= math.sqrt(max_tiles / (nx * ny)) * 0.98  # 块数超上限：一个像素代表更多模型单位
+    else:
+        raise ArenaError(f"{nx * ny} tiles are needed even at ppu={ppu:.3g}; raise max_tiles or lower pixels_per_unit")
     canvas = Image.new("RGB", (W, H), "white")
     for j in range(ny):
         for i in range(nx):
@@ -250,12 +343,9 @@ def _capture_tiles(v, pane, region, ppu, max_tiles):
                 py, bottom_px = round((top - Y0) * ppu), round((bottom - Y0) * ppu)
             else:
                 py, bottom_px = round((Y1 - top) * ppu), round((Y1 - bottom) * ppu)
-            img = _capture_pane(pane, pr)
             size = (max(1, right_px - px), max(1, bottom_px - py))
-            if size != img.size:
-                img = img.resize(size, Image.Resampling.BICUBIC)
-            canvas.paste(img, (px, py))
-    return canvas, nx * ny
+            canvas.paste(_resample(_capture_pane(pane, pr), size), (px, py))
+    return canvas, nx * ny, ppu
 
 
 def capture_animation_frame(a, model, out_path, view_name, simulation_time, *, speed=0.5, timeout=120):
@@ -292,7 +382,8 @@ def capture_animation_frame(a, model, out_path, view_name, simulation_time, *, s
             while state in (0, 3, 4, 5, 6) and time.monotonic() < deadline:
                 time.sleep(0.02)
                 state = m.State
-            if state != 13 or m.SIMAN.RunCurrentTime >= simulation_time:
+            now = safe(lambda: m.SIMAN.RunCurrentTime)  # no SIMAN run state: the run never really started
+            if state != 13 or now is None or now >= simulation_time:
                 raise ArenaError(f"Arena could not set the animation breakpoint at {simulation_time:g} (state {state})")
             m.BreakOnTime(simulation_time)
             state = m.State
@@ -308,3 +399,25 @@ def capture_animation_frame(a, model, out_path, view_name, simulation_time, *, s
         finally:
             if m.State:
                 m.End()
+
+
+def capture_animation_frames(a, model, out_dir, view_name, times, *, speed=0.5, timeout=120, prefix="frame"):
+    """按递增的仿真时刻导出一组二维动画 PNG，用来逐帧核对运动、时钟和排队是否连贯。
+
+    每帧都从零重新播放一次（Arena 14 的暂停不能用 COM 续播），所以帧数保持在少量：
+    5 到 8 个关键时刻比一次抓几十帧更能看出运动方向和停顿。timeout 是每一帧的墙钟上限。
+    """
+    times = list(times)
+    values = sorted({float(t) for t in times})
+    if not values:
+        raise ArenaError("give at least one simulation time")
+    if len(values) != len(times):
+        raise ArenaError("simulation times must be distinct")
+    os.makedirs(out_dir, exist_ok=True)
+    frames = []
+    for t in values:
+        out_path = os.path.join(out_dir, f"{prefix}_{t:g}.png")
+        res = capture_animation_frame(a, model, out_path, view_name, t, speed=speed, timeout=timeout)
+        frames.append({"out": res["out"], "size": res["size"], "simulation_time": res["simulation_time"]})
+    return {"model": os.path.abspath(model), "view_name": view_name, "frames": frames, "count": len(frames),
+            "budget_seconds": timeout * len(frames)}

@@ -66,6 +66,10 @@ def remember_report_license(text):
 
 
 def describe(license_type):
+    try:  # some builds report the enum as text
+        license_type = int(license_type)
+    except (TypeError, ValueError):
+        pass
     name, status = LICENSES.get(license_type, (f"unknown ({license_type})", "unknown"))
     res = {"license_type": license_type, "name": name, "status": status}
     cfg = load_config()

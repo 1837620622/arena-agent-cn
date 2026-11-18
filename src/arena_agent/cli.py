@@ -23,8 +23,9 @@
   arena-agent scenarios model.doe cases.json [--reps N] [--measures S ...]
   arena-agent results model.doe [--per-rep] [--all]   # statistics of the last run (no new run)
   arena-agent views model.doe                   # list named views
-  arena-agent screenshot model.doe out.png [--view NAME | --region X0 Y0 X1 Y1] [--ppu P]
+  arena-agent screenshot model.doe out.png [--view NAME | --region X0 Y0 X1 Y1] [--ppu P] [--tiles N]
   arena-agent animation-frame model.doe out.png --view NAME --time T [--speed S] [--timeout SECONDS]
+  arena-agent animation-frames model.doe out_dir --view NAME --time T [T ...] [--speed S] [--prefix P]
   arena-agent validate model.doe [--reps N] [--png out.png] [--view NAME] [--ppu P]
   arena-agent close  [model.doe ...]
 """
@@ -50,25 +51,52 @@ def opt_list(args, flag):
     return vals
 
 
+# How many values each option takes, so the command's own arguments can be found wherever the options sit.
+ONE_VALUE_FLAGS = {"--reps", "--png", "--view", "--ppu", "--tiles", "--speed", "--timeout", "--prefix",
+                   "--client", "--panel"}
+LIST_VALUE_FLAGS = {"--show", "--measures", "--set", "--time"}
+FOUR_VALUE_FLAGS = {"--region"}
+
+
 def positional(args):
-    res, skip = [], False
-    for x in args:
-        if x.startswith("--"):
-            skip = True
-            continue
-        if not skip:
+    """The command's own arguments: every token that is neither an option nor a value belonging to one. An option may
+    stand before the file names too (`run --reps 5 model.doe`), not only after them."""
+    res, i = [], 0
+    while i < len(args):
+        x = args[i]
+        if x in FOUR_VALUE_FLAGS:
+            i += 5
+        elif x in ONE_VALUE_FLAGS:
+            i += 2
+        elif x in LIST_VALUE_FLAGS:
+            i += 1
+            while i < len(args) and not args[i].startswith("--"):
+                i += 1
+        elif x.startswith("--"):
+            i += 1  # an option this command does not know: skip the flag itself
+        else:
             res.append(x)
+            i += 1
     return res
 
 
 def kv(items):
-    return dict(x.split("=", 1) for x in items)
+    """["Operand=Value", ...] -> {"Operand": "Value"}"""
+    res = {}
+    for x in items:
+        if "=" not in x:
+            raise ValueError(f"{x!r} is not Operand=Value")
+        k, v = x.split("=", 1)
+        res[k] = v
+    return res
 
 
 def parse_changes(items):
     """["Doctor:Capacity=4", ...] -> {"Doctor": {"Capacity": "4"}}"""
     ch = {}
     for x in items:
+        if ":" not in x or "=" not in x.split(":", 1)[1]:
+            raise ValueError(f"{x!r} is not Module:Operand=Value")
         mod, rest = x.split(":", 1)
         k, v = rest.split("=", 1)
         ch.setdefault(mod, {})[k] = v
@@ -93,6 +121,31 @@ def com(fn, *args, **kwargs):
         return fn(core.app(), *args, **kwargs)
     except core.ArenaError as e:
         return {"error": str(e)}
+    except Exception as e:  # a COM failure or an unexpected model state: JSON, not a traceback
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+# Arguments each command needs (the ones with their own validation are not listed), and their usage line.
+ARGUMENTS = {"defs": 1, "operands": 2, "reference": 1, "inspect": 1, "build": 1, "set": 2, "setup": 2, "delete": 2,
+             "check": 1, "run": 1, "scenarios": 2, "results": 1, "views": 1, "screenshot": 2, "animation-frame": 2,
+             "animation-frames": 2, "validate": 1}
+USAGE = {"defs": "arena-agent defs BasicProcess",
+         "operands": "arena-agent operands BasicProcess Create",
+         "reference": "arena-agent reference Process [--panel BasicProcess]",
+         "inspect": "arena-agent inspect model.doe [out.json] [--full]",
+         "build": "arena-agent build spec.json",
+         "set": "arena-agent set model.doe Module Operand=Value [Operand=Value ...]",
+         "setup": "arena-agent setup model.doe replications=10 replication_length=480",
+         "delete": "arena-agent delete model.doe Module [Module ...]",
+         "check": "arena-agent check model.doe",
+         "run": "arena-agent run model.doe [--reps N] [--set Module:Operand=Value ...]",
+         "scenarios": "arena-agent scenarios model.doe cases.json [--reps N]",
+         "results": "arena-agent results model.doe [--per-rep] [--all]",
+         "views": "arena-agent views model.doe",
+         "screenshot": "arena-agent screenshot model.doe out.png [--view NAME] [--ppu P] [--tiles N]",
+         "animation-frame": "arena-agent animation-frame model.doe out.png --view NAME --time T",
+         "animation-frames": "arena-agent animation-frames model.doe out_dir --view NAME --time T [T ...]",
+         "validate": "arena-agent validate model.doe [--reps N] [--png out.png]"}
 
 
 def main(argv=None):
@@ -102,6 +155,18 @@ def main(argv=None):
         return 0
     cmd, args = argv[0], argv[1:]
     pos = positional(args)
+    if len(pos) < ARGUMENTS.get(cmd, 0):
+        out({"error": f"{cmd} needs at least {ARGUMENTS[cmd]} argument(s)", "usage": USAGE.get(cmd, "")})
+        return 2
+    try:
+        return dispatch(cmd, args, pos)
+    except (ValueError, KeyError, IndexError, OSError) as e:  # a bad argument or a missing file: JSON, no traceback
+        out({"error": f"{type(e).__name__}: {e}", "usage": USAGE.get(cmd, "")})
+        return 2
+
+
+def dispatch(cmd, args, pos):
+    """Run one command and return its exit code."""
     if cmd in ("--version", "version"):
         out({"arena-agent": __version__})
         return 0
@@ -194,10 +259,24 @@ def main(argv=None):
         res = com(core.list_named_views, pos[0])
     elif cmd == "screenshot":
         from .snapshot import snapshot
-        region = [float(x) for x in opt_list(args, "--region")] or None
-        ppu = opt_list(args, "--ppu")
-        view = opt_list(args, "--view")
-        res = com(snapshot, pos[0], pos[1], region, float(ppu[0]) if ppu else None,
+        try:
+            if len(pos) != 2:
+                raise ValueError("use: arena-agent screenshot model.doe out.png [--view NAME | --region X0 Y0 X1 Y1]"
+                                 " [--ppu P] [--tiles N]")
+            if any(flag in args and len(values) != 1
+                   for flag, values in (("--ppu", opt_list(args, "--ppu")), ("--view", opt_list(args, "--view")),
+                                        ("--tiles", opt_list(args, "--tiles")))):
+                raise ValueError("--ppu, --view and --tiles take one value each")
+            region = [float(x) for x in opt_list(args, "--region")] or None
+            if region is not None and len(region) != 4:
+                raise ValueError("--region takes four numbers: X0 Y0 X1 Y1")
+            ppu, view, tiles = (opt_list(args, flag) for flag in ("--ppu", "--view", "--tiles"))
+            pixels_per_unit = float(ppu[0]) if ppu else None
+            max_tiles = int(tiles[0]) if tiles else 64
+        except ValueError as e:
+            out({"error": str(e)})
+            return 2
+        res = com(snapshot, pos[0], pos[1], region, pixels_per_unit, max_tiles,
                   view_name=view[0] if view else None)
     elif cmd == "animation-frame":
         from .snapshot import capture_animation_frame
@@ -212,6 +291,21 @@ def main(argv=None):
             out({"error": str(e)})
             return 2
         res = com(capture_animation_frame, pos[0], pos[1], view[0], simulation_time, speed=run_speed, timeout=wait)
+    elif cmd == "animation-frames":
+        from .snapshot import capture_animation_frames
+        view, times, speed, timeout, prefix = (opt_list(args, flag) for flag in
+                                               ("--view", "--time", "--speed", "--timeout", "--prefix"))
+        try:
+            if len(pos) != 2 or len(view) != 1 or not times or len(speed) > 1 or len(timeout) > 1 or len(prefix) > 1:
+                raise ValueError("use: arena-agent animation-frames model.doe out_dir --view NAME --time T [T ...]")
+            values = [float(t) for t in times]
+            run_speed = float(speed[0]) if speed else 0.5
+            wait = float(timeout[0]) if timeout else 120
+        except ValueError as e:
+            out({"error": str(e)})
+            return 2
+        res = com(capture_animation_frames, pos[0], pos[1], view[0], values, speed=run_speed, timeout=wait,
+                  **({"prefix": prefix[0]} if prefix else {}))
     elif cmd == "validate":
         from .validation import validate
         reps = opt_list(args, "--reps")

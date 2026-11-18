@@ -107,13 +107,13 @@ def read(model_path, since=0, per_replication=False, include_empty=False, *, tex
         path = base + suffix
         try:
             modified = os.stat(path).st_mtime
-        except FileNotFoundError:
+        except OSError:
             continue
         if suffix == ".db":
             # SQLite 可能先把最新事务写进 WAL，主数据库要到 checkpoint 才更新。
             try:
                 modified = max(modified, os.stat(path + "-wal").st_mtime)
-            except FileNotFoundError:
+            except OSError:
                 pass
         if modified >= since:
             candidates.append((suffix, path, modified))
@@ -132,7 +132,7 @@ def read(model_path, since=0, per_replication=False, include_empty=False, *, tex
             try:
                 with open(path, errors="replace") as report:
                     stats = text_statistics(report.read(), per_replication)
-            except FileNotFoundError:
+            except OSError:  # Arena may still hold the report: try the next candidate
                 continue
             if stats:
                 return {"source": path, "statistics": stats,

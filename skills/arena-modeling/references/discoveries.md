@@ -516,6 +516,86 @@ report's printed precision.
 - **Finding:** `HKCR\Arena.Application\CLSID` -> `HKCR\CLSID\{...}\LocalServer32` gives Arena.exe's path, so the
   install folder (template references, Blocks.txt, Elements.txt) needs no hard-coded path.
 
+## Session 2026-11-03: 出图质量、排版和动画序列
+
+### 51. 自动声明的数据模块叠在一个点上  ⚠
+
+- **Finding (code):** `declare()` gave every auto-declared Attribute/Variable/Queue/Resource/Entity the same (x, y).
+  `layout_warnings` skips data modules, so nothing reported it; in the flowchart and in every export they form one
+  illegible block behind the flow.
+- **Change:** `declare_position()` spreads them in a 6-wide grid from `declare_at`, with one cursor shared by all five
+  kinds. `build` and `set_data` both pass that cursor.
+
+### 52. 截图缺省是一张缩略图
+
+- **Finding (behaviour):** without `pixels_per_unit`, `_capture_tiles` fitted the whole region into one screen, so a
+  model of more than a few modules exported at unreadable text.
+- **Change:** the default now never goes below Arena's current zoom (pixels per model unit on the screen): a region
+  that fits one pane at that scale is one image, a larger one is tiled up to `max_tiles`, and the scale drops only
+  when that many tiles are not enough. Shrinking resamples with LANCZOS, growing with BICUBIC; a hard cap (120 MP,
+  30,000 px a side) limits one PNG instead of failing in memory, and `snapshot` returns the `pixels_per_unit` used.
+- **Open:** joins at native scale have not been inspected on a large Arena 14 model yet.
+
+### 53. 动画按帧重放
+
+- **Change:** `capture_animation_frames` samples several simulation times. Arena 14 cannot resume a paused animation
+  through COM, so each frame replays the run from zero; 5-8 key moments per model is the practical range.
+- **Open:** try `Go` after a breakpoint on Arena 14; if the run continues, one playback with several breakpoints
+  replaces the replays.
+
+### 54. 选项后面的文件名被当成不存在
+
+- **Finding (code):** `positional()` threw away every token after the first `--`, so `arena-agent run --reps 5 model.doe`
+  crashed with IndexError instead of running; a typo in `--set Module:Operand=Value` surfaced as a `dict()` update
+  traceback, and a missing path in `results`, `views` and the like raised IndexError.
+- **Change:** options are skipped by their arity, so file names may stand anywhere; a missing argument or a malformed
+  value returns JSON with a usage line and exit code 2, and `com()` reports non-Arena exceptions as JSON too.
+
+### 55. 批跑选项留在了模型上
+
+- **Finding (code):** `_run_batch` set `QuietMode` and `BatchMode` on the model and never put them back. Arena 14 was
+  covered by the outer `temporary_settings` of `_run_once`, but on Arena 16 the model stayed in batch mode after
+  `run_model`, which changes how the GUI behaves afterwards.
+- **Change:** both options are set inside a `temporary_settings` block around the whole run.
+
+### 56. 运行设置按翻译后的名字还原
+
+- **Finding (code):** `run()` captured the Run Setup through `run_setup()`, which translates the unit enums into names.
+  When COM reported a value the table did not know, the restore hit "not a valid unit", the error went into a throwaway
+  report, and the model kept the scenario's setup in memory.
+- **Change:** `run_setup_raw()` keeps the raw COM values and the run puts exactly those back afterwards.
+
+### 57. 首行为空的重复组读不出来
+
+- **Finding (code):** `inspect` skipped an operand outright when its first value was empty, so a repeat group written as
+  `Value(3)` alone — the documented way to address a single row — never appeared in the model dump.
+- **Change:** operands the template marks as arrays (`Operand.Array`) are read row by row whatever row 1 holds; the
+  extra COM cost stays at one probe per operand.
+
+### 58. 版本号和许可类型可能是文本
+
+- **Finding (code):** `com_major_version` accepted only an int, so a text `Version` from COM fell through to the
+  Arena 16 path on an Arena 14 install; `LicenseType` had the same gap and reported "unknown" for a known edition.
+- **Change:** both coerce numeric text before deciding.
+
+## Session 2026-11-04: 导图区域、关闭与错误信息
+
+### 54. 导图缺省区域漏掉标题
+
+- **Finding:** the default export region came from the flowchart modules only, so a section title (`shapes`) placed
+  above the first row was cut out of the PNG; a model that only declares names could not be exported at all.
+- **Change:** `content_bbox()` unions the modules with the text shapes within 5,000 model units of them (a stray
+  shape far away stays out), falls back to the data modules when there are no flowchart modules, and only reports
+  "no flowchart modules" when the model draws nothing.
+
+### 55. 读回与关闭的边界情形
+
+- **Change:** `Model.Close()` no longer reports a failure when the model has no `QuietMode` property; `delete`
+  activates the model before it uses `ActiveView.Selection`; `run` reads the `.err`, report and license paths from a
+  saved path only, so an unsaved model no longer produces `.err` beside the working directory; `results.read` treats
+  a report Arena still holds as "try the next candidate" instead of an exception; `arena-agent` answers a missing
+  `Operand=Value` or a malformed `--set Module:Operand=Value` with JSON and exit code 2.
+
 ## Open items (to try next)
 
 - Lint `AQUE`/`SAQUE`/`AG`/`SAG`/`ATTR` calls for a bare attribute name (22).

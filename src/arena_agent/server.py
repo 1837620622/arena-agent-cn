@@ -101,9 +101,11 @@ def build_model(spec: dict[str, Any] | None = None, spec_path: str | None = None
     """Build a new model, or extend an existing one, from a build spec (pass the spec object, or spec_path to a JSON
     file). New model: "save_as" is required. Extending: "base" is opened and first saved as "save_as", so the base
     file is never changed. The spec lists modules (panel, type, x, y, data, rows/cases/resources), connections
-    (from, to, exit), updates to existing modules, run_setup, declare, delete. Names used by Assign, ReadWrite,
-    Process, Hold, Search and Create are declared automatically. Compiles at the end: read check_errors (each names
-    the module at fault) and dropped_connections. Spec format: arena_guide topic "build-spec"."""
+    (from, to, exit), updates to existing modules, run_setup, declare, delete. Modules without x/y are placed from the
+    connection graph (tune with "layout": dx, dy, columns, origin); "views" saves named views from module names or a
+    region; "shapes" adds titles with level title|section|note. Names used by Assign, ReadWrite, Process, Hold,
+    Search and Create are declared automatically, in a grid rather than stacked. Compiles at the end: read
+    check_errors (each names the module at fault) and dropped_connections. Spec format: arena_guide "build-spec"."""
     if spec is None and spec_path is None:
         return {"error": "pass spec or spec_path"}
     if spec is None:
@@ -184,13 +186,17 @@ def list_named_views(model: str) -> dict:
 
 @mcp.tool()
 def screenshot_model(model: str, out_path: str | None = None, region: list[float] | None = None,
-                     pixels_per_unit: float | None = None, view_name: str | None = None) -> Any:
-    """Export an Arena PNG by view_name or by region [x0, y0, x1, y1]. In edit mode, omitting both fits the
-    flowchart. Set pixels_per_unit for a tiled edit-mode export. For animation, first pause with the target region
-    visible in Arena. The paused snapshot captures one frame without changing the current view."""
+                     pixels_per_unit: float | None = None, view_name: str | None = None,
+                     max_tiles: int = 64) -> Any:
+    """Export an Arena PNG by view_name or by region [x0, y0, x1, y1]. Omit both to export the whole flowchart.
+    Without pixels_per_unit the scale is never below Arena's current zoom, so labels never come out smaller than on
+    screen: a region that fits one pane at that scale is one image, a bigger one is tiled up to max_tiles (raise it
+    for a bigger, still sharp image) and only then scaled down. Set pixels_per_unit to force a scale. For animation,
+    first pause with the target region visible in Arena: the paused snapshot captures one frame without changing the
+    current view."""
     from .snapshot import snapshot
     out_path = out_path or os.path.splitext(os.path.abspath(model))[0] + "_flowchart.png"
-    res = _guard(snapshot, model, out_path, region, pixels_per_unit, view_name=view_name)
+    res = _guard(snapshot, model, out_path, region, pixels_per_unit, max_tiles, view_name=view_name)
     if "error" in res:
         return res
     return [json.dumps(res), Image(path=res["out"])]
@@ -207,6 +213,22 @@ def capture_animation_frame(model: str, out_path: str, view_name: str, simulatio
     if "error" in res:
         return res
     return [json.dumps(res), Image(path=res["out"])]
+
+
+@mcp.tool()
+def capture_animation_frames(model: str, out_dir: str, view_name: str, simulation_times: list[float],
+                             speed: float = 0.5, timeout: float = 120, prefix: str = "frame") -> Any:
+    """Export a sequence of animation frames (Arena 14) at increasing simulation times, to check that motion,
+    the clock, queues and status text stay continuous: 5-8 key moments are more telling than many frames. Each
+    frame replays the run from zero (Arena 14 cannot resume a paused animation through COM), so the wall clock is
+    about the number of frames times the replay time; timeout is the limit for one frame. Returns the frame list
+    and the first three images."""
+    from .snapshot import capture_animation_frames as render_frames
+    res = _guard(render_frames, model, out_dir, view_name, simulation_times, speed=speed, timeout=timeout,
+                 prefix=prefix)
+    if "error" in res:
+        return res
+    return [json.dumps(res)] + [Image(path=f["out"]) for f in res["frames"][:3]]
 
 
 @mcp.tool()

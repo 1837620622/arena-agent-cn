@@ -62,7 +62,8 @@ def detect():
 
 def _load_json(p):
     try:
-        return json.load(open(p, encoding="utf-8"))
+        with open(p, encoding="utf-8") as f:  # closed before anything replaces it
+            return json.load(f)
     except (OSError, ValueError):
         return {}
 
@@ -72,17 +73,21 @@ def _save_json(p, data):
     if os.path.exists(p):
         shutil.copy2(p, p + ".bak-arena-agent")
     tmp = p + ".tmp"
-    json.dump(data, open(tmp, "w", encoding="utf-8"), indent=2)
+    with open(tmp, "w", encoding="utf-8") as f:  # close before replacing, or the copy can be empty
+        json.dump(data, f, indent=2)
     os.replace(tmp, p)
 
 
 def _copy_skill(client):
     dst = skill_target(client)
+    src = paths.skill_dir()
     if not dst:
         return None
+    if not os.path.isdir(src):
+        return None  # no bundled skill (packaging without it): the arena_guide tool still serves the text
     if os.path.isdir(dst):
         shutil.rmtree(dst)
-    shutil.copytree(paths.skill_dir(), dst)
+    shutil.copytree(src, dst)
     return dst
 
 
@@ -95,7 +100,11 @@ def _toml_str(s):
 
 def _codex_mcp(cmd, remove=False):
     p = os.path.join(codex_home(), "config.toml")
-    txt = open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            txt = f.read()
+    else:
+        txt = ""
     new = TOML_BLOCK.sub("", txt).rstrip() + "\n"
     if not remove:
         args = ", ".join(_toml_str(a) for a in cmd[1:])
@@ -105,7 +114,8 @@ def _codex_mcp(cmd, remove=False):
         os.makedirs(os.path.dirname(p), exist_ok=True)
         if os.path.exists(p):
             shutil.copy2(p, p + ".bak-arena-agent")
-        open(p, "w", encoding="utf-8").write(new.lstrip("\n"))
+        with open(p, "w", encoding="utf-8") as f:  # close before Codex reads it
+            f.write(new.lstrip("\n"))
     return p
 
 
@@ -170,7 +180,10 @@ def uninstall(clients=None):
 def status(client):
     if client == "codex":
         p = os.path.join(codex_home(), "config.toml")
-        mcp = os.path.exists(p) and bool(TOML_BLOCK.search(open(p, encoding="utf-8").read()))
+        mcp = False
+        if os.path.exists(p):
+            with open(p, encoding="utf-8") as f:
+                mcp = bool(TOML_BLOCK.search(f.read()))
     elif client == "claude-desktop":
         mcp = NAME in _load_json(desktop_config()).get("mcpServers", {})
     else:

@@ -56,6 +56,89 @@ def test_named_view_bounds_are_ordered_for_export():
     assert core.named_view_regions(model) == {"Detail": [20, 60, 30, 100]}
 
 
+def test_plan_layout_follows_connections_and_stacks_branches():
+    spec = {"modules": [{"id": "a"}, {"id": "b"}, {"id": "c"}, {"id": "d"}],
+            "connections": [{"from": "a", "to": "b"}, {"from": "b", "to": "c"}, {"from": "a", "to": "d"}]}
+    pos = core.plan_layout(spec)
+    assert pos["a"][0] < pos["b"][0] < pos["c"][0]  # one column right of the module that feeds it
+    assert pos["d"][0] == pos["b"][0]  # a branch shares the column of its sibling
+    assert pos["d"][1] != pos["b"][1]  # and never lands on the same point
+
+
+def test_plan_layout_wraps_long_chains_and_survives_a_cycle():
+    chain = {"modules": [{"id": f"m{i}"} for i in range(20)],
+             "connections": [{"from": f"m{i}", "to": f"m{i + 1}"} for i in range(19)]}
+    pos = core.plan_layout(chain)
+    assert all(abs(x) <= 32000 and abs(y) <= 32000 for x, y in pos.values())  # Arena's view is 16-bit
+    cycle = {"modules": [{"id": "x"}, {"id": "y"}],
+             "connections": [{"from": "x", "to": "y"}, {"from": "y", "to": "x"}]}
+    assert set(core.plan_layout(cycle)) == {"x", "y"}
+
+
+def test_declared_data_modules_are_spread_out():
+    cursor = [0, -4000, 0]
+    points = []
+    for _ in range(8):
+        points.append(core.declare_position(cursor))
+        cursor[2] += 1
+    assert len(set(points)) == 8  # no two declared modules on one point
+    assert {y for _, y in points[:6]} == {-4000}  # a row of six
+    assert points[6][1] < points[0][1]  # then a second row below it
+
+
+def test_screenshot_defaults_to_the_native_screen_scale():
+    pytest.importorskip("win32gui")
+    from arena_agent import snapshot
+
+    view = SimpleNamespace(Left=0, Top=0, Right=10000, Bottom=5000)
+    assert snapshot._native_ppu(view, 1500, 750) == pytest.approx(0.15)
+    assert snapshot._native_ppu(SimpleNamespace(Left=5, Top=5, Right=5, Bottom=5), 100, 100) is None
+
+
+def test_export_region_includes_near_titles_and_ignores_stray_shapes():
+    pytest.importorskip("win32gui")
+    from arena_agent import snapshot
+
+    def box(left, top, right, bottom):
+        return SimpleNamespace(Left=left, Top=top, Right=right, Bottom=bottom)
+
+    modules = [SimpleNamespace(Definition=SimpleNamespace(DataModule=False), shape=box(0, 0, 2000, 1000)),
+               SimpleNamespace(Definition=SimpleNamespace(DataModule=False), shape=box(3000, 0, 5000, 1000))]
+    shapes = [box(-500, -1500, 1500, -400), box(60000, 60000, 61000, 61000)]  # a title above, a stray frame far away
+    model = SimpleNamespace(Modules=SimpleNamespace(Count=2, Item=lambda i: modules[i - 1]),
+                            Shapes=SimpleNamespace(Count=2, Item=lambda i: shapes[i - 1]))
+    assert snapshot.content_bbox(model) == (-500, -1500, 5000, 1000)  # the title is kept, the stray shape is not
+
+
+def test_export_region_falls_back_to_data_modules():
+    pytest.importorskip("win32gui")
+    from arena_agent import snapshot
+
+    resource = SimpleNamespace(Definition=SimpleNamespace(DataModule=True),
+                               shape=SimpleNamespace(Left=0, Top=-4000, Right=1500, Bottom=-3000))
+    model = SimpleNamespace(Modules=SimpleNamespace(Count=1, Item=lambda _: resource), Shapes=None)
+    assert snapshot.content_bbox(model) == (0, -4000, 1500, -3000)  # only declarations: still exportable
+    empty = SimpleNamespace(Modules=SimpleNamespace(Count=0), Shapes=None)
+    with pytest.raises(core.ArenaError, match="no flowchart modules"):
+        snapshot.content_bbox(empty)
+
+
+def test_inspect_reads_repeat_rows_of_a_group_whose_first_row_is_empty(monkeypatch):
+    operands = SimpleNamespace(Count=2, Item=lambda i: [
+        SimpleNamespace(Name="Name", DefaultValue="", Array=False),
+        SimpleNamespace(Name="Value", DefaultValue="", Array=True)][i - 1])
+    # writing row 3 creates rows 1 and 2 with defaults: row 1 is empty, row 3 carries the value
+    data = {"Name": "Late", "Value": "", "Value(2)": "", "Value(3)": "7"}
+    module = SimpleNamespace(Definition=SimpleNamespace(Name="Assign", DataModule=False, Operands=operands),
+                             shape=SimpleNamespace(Left=10, Top=20), Data=lambda operand: data.get(operand))
+    model = SimpleNamespace(FullName="m.doe", Name="m", Modules=SimpleNamespace(Count=1, Item=lambda _: module))
+    monkeypatch.setattr(core, "open_model", lambda *_: model)
+    monkeypatch.setattr(core, "connection_list", lambda _: [])
+    monkeypatch.setattr(core, "run_setup", lambda _: {})
+    ops = core.inspect(None, "m.doe")["modules"][0]["ops"]
+    assert ops["Value(3)"] == "7" and "Value" not in ops  # the row was silently lost before
+
+
 def test_failed_check_does_not_run_or_export(tmp_path, monkeypatch):
     path = tmp_path / "invalid.doe"
     path.write_bytes(b"unchanged")
@@ -97,6 +180,11 @@ def test_active_version_selects_report_settings(version, uses_text_reports, monk
     assert checked == [(True, uses_text_reports)]
     assert core._run_once(app, model, None, True) == "ran"
     assert not model.DisableReportDatabase and model.DisplayDefaultReport == 0
+
+
+def test_com_major_version_accepts_text_from_com():
+    assert core.com_major_version(1400) == 14 and core.com_major_version("1620") == 16
+    assert core.com_major_version(None) is None and core.com_major_version(99) is None
 
 
 @pytest.mark.parametrize(("major", "record_array"), [(14, False), (14, True), (16, False), (16, True)])
@@ -284,6 +372,11 @@ def test_edition_user_override(cfg):
     assert edition.describe(2)["status"] == "view-only"
 
 
+def test_edition_accepts_a_text_license_type(cfg):
+    assert edition.describe("4")["status"] == "full"  # some builds report the enum as text
+    assert edition.describe(None)["status"] == "unknown"
+
+
 def test_limit_message():
     assert edition.is_limit_message("You have exceeded 150 entities allowed in the student version")
     assert not edition.is_limit_message("Undefined identifier: Patient")
@@ -320,6 +413,49 @@ def test_cli_parsing():
     args = ["m.doe", "--reps", "5", "--show", "A", "B", "--per-rep"]
     assert cli.positional(args) == ["m.doe"]
     assert cli.opt_list(args, "--show") == ["A", "B"]
+
+
+def test_positional_finds_files_around_options():
+    assert cli.positional(["--reps", "5", "m.doe"]) == ["m.doe"]  # an option may stand before the file names
+    assert cli.positional(["m.doe", "out.png", "--view", "ANIMATION", "--time", "0", "20"]) == ["m.doe", "out.png"]
+    assert cli.positional(["--region", "-10", "-10", "20", "20", "m.doe", "o.png"]) == ["m.doe", "o.png"]
+
+
+def test_cli_asks_for_missing_arguments_instead_of_crashing(capsys):
+    assert cli.main(["run", "--reps", "5"]) == 2  # was an IndexError traceback
+    reported = json.loads(capsys.readouterr().out)
+    assert "needs at least" in reported["error"] and reported["usage"]
+
+
+def test_cli_rejects_a_bad_set_expression_as_json(capsys):
+    assert cli.main(["run", "m.doe", "--set", "Doctor"]) == 2  # was a dict-update traceback
+    reported = json.loads(capsys.readouterr().out)
+    assert "Module:Operand=Value" in reported["error"]
+
+
+def test_run_setup_is_read_and_restored_with_raw_com_values():
+    model = SimpleNamespace(NumberOfReplications=5, ReplicationLength=480, ReplicationLengthTimeUnits=2,
+                            WarmUpPeriod=0, WarmUpPeriodTimeUnits=2, BaseTimeUnits=2, HoursPerDay=24,
+                            TerminatingCondition="")
+    raw = core.run_setup_raw(model)
+    assert raw["replications"] == 5 and raw["replication_length_units"] == 2  # raw enum, not a translated name
+    report = {"errors": []}
+    core.apply_run_setup(model, {"replications": 10, "replication_length_units": "hours"}, report)
+    assert not report["errors"] and (model.NumberOfReplications, model.ReplicationLengthTimeUnits) == (10, 1)
+    model.NumberOfReplications, model.ReplicationLengthTimeUnits = raw["replications"], raw["replication_length_units"]
+    assert (model.NumberOfReplications, model.ReplicationLengthTimeUnits) == (5, 2)
+
+
+def test_extension_band_stays_inside_the_arena_view():
+    assert core.band_origin((-5000, -5000, 5000, 9000), 2600, 1800) == [-5000, 10800]
+    assert core.band_origin((0, 0, 20000, 31000), 2600, 1800) == [22600, 0]  # below would be out of view
+    assert core.band_origin((0, 0, 31000, 31000), 2600, 1800) == [0, 0]
+
+
+def test_connect_reports_a_malformed_case_exit():
+    report = {"errors": []}
+    core.connect(None, {"a": object(), "b": object()}, {"from": "a", "to": "b", "exit": "case:"}, report)
+    assert "case:N" in report["errors"][0]  # no ValueError traceback
 
 
 def test_guide_topics_present():

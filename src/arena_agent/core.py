@@ -59,6 +59,18 @@ DECLARERS = {"attribute": ("BasicProcess", "Attribute"), "variable": ("BasicProc
              "queue": ("BasicProcess", "Queue"), "resource": ("BasicProcess", "Resource"),
              "entity": ("BasicProcess", "Entity")}
 TIME_UNITS = {"days": 0, "hours": 1, "minutes": 2, "seconds": 3}
+# Run Setup field -> IModel property, shared by reading, applying and restoring the setup.
+SETUP_PROPS = {"replications": "NumberOfReplications", "replication_length": "ReplicationLength",
+               "replication_length_units": "ReplicationLengthTimeUnits", "warm_up": "WarmUpPeriod",
+               "warm_up_units": "WarmUpPeriodTimeUnits", "base_time_units": "BaseTimeUnits",
+               "hours_per_day": "HoursPerDay", "terminating_condition": "TerminatingCondition"}
+VIEW_LIMIT = 30000  # Arena's flowchart view is 16-bit: -32,768..32,767
+# Default layout for modules built without an explicit x/y, the grid the auto-declared data modules go in, and the
+# text sizes for flowchart titles (shapes).
+LAYOUT = {"dx": 2600, "dy": 1800, "columns": 12, "origin": [0, 0]}
+DECLARE_STEP = (1500, 1100)
+DECLARE_COLUMNS = 6
+TEXT_LEVELS = {"title": 700, "section": 480, "note": 320}
 
 
 class ArenaError(Exception):
@@ -124,8 +136,12 @@ def reserved_clashes(names, a=None):
 
 
 def com_major_version(version):
-    """Convert Arena's COM version (for example, 1400 or 1620) to a release major."""
-    return version // 100 if isinstance(version, int) and version >= 100 else None
+    """Convert Arena's COM version (for example, 1400 or 1620) to a release major. Some builds report it as text."""
+    try:
+        version = int(version)
+    except (TypeError, ValueError):
+        return None
+    return version // 100 if version >= 100 else None
 
 
 def app(visible=True):
@@ -136,6 +152,9 @@ def app(visible=True):
             raise
         directory = arena_dir()
         exe = os.path.join(directory, "Arena.exe") if directory else None
+        if not exe or not os.path.exists(exe):
+            raise ArenaError("Arena is not registered on this machine: install Rockwell Arena, or set ARENA_DIR to "
+                             "the folder that holds Arena.exe") from exc
         major = safe(lambda: win32api.GetFileVersionInfo(exe, "\\")["FileVersionMS"] >> 16)
         a = _launch_arena14(exe) if major == ARENA_14 else wc.Dispatch("Arena.Application")
     a.Visible = visible
@@ -192,7 +211,7 @@ def open_model(a, path):
     path = os.path.abspath(path)
     for i in range(1, a.Models.Count + 1):
         m = a.Models.Item(i)
-        if m.FullName.lower() == path.lower():
+        if (safe(lambda: m.FullName) or "").lower() == path.lower():
             return m
     if not os.path.exists(path):
         raise ArenaError(f"no such model file: {path}")
@@ -295,7 +314,14 @@ def used_names(ms_items, t):
     return attrs, vars_, queues, res, ents
 
 
-def declare(a, m, existing, names, what, x, y, report):
+def declare_position(at):
+    """Where the next auto-declared data module goes. `at` is a cursor [x0, y0, count]; the modules are laid out in a
+    short grid so they never stack on one point (stacked data modules are unreadable in the flowchart and in exports)."""
+    x0, y0, i = at
+    return x0 + (i % DECLARE_COLUMNS) * DECLARE_STEP[0], y0 - (i // DECLARE_COLUMNS) * DECLARE_STEP[1]
+
+
+def declare(a, m, existing, names, what, at, report):
     """Create Attribute / Variable / Queue / Resource / Entity data modules for names the model does not define yet."""
     pn, tn = DECLARERS[what]
     panel = a.Panels.Attach(pn)
@@ -303,6 +329,8 @@ def declare(a, m, existing, names, what, x, y, report):
     for n in sorted(names):
         if n in existing:
             continue
+        x, y = declare_position(at)
+        at[2] += 1
         mod = m.Modules.Create(panel, d, x, y)
         setdata(mod, "Name", n)
         existing[n] = mod
@@ -314,7 +342,13 @@ def connect(m, made, c, report):
     ex = c.get("exit", "next").lower()
     idx = None
     if ex.startswith("case"):
-        operand, idx = "N Next Label Yes", int(ex.split(":")[1])
+        try:
+            idx = int(ex.split(":")[1])
+        except (IndexError, ValueError):
+            report["errors"].append(f"connect {c['from']} -> {c['to']}: exit {ex!r} must be case:N with a condition "
+                                    f"number (case:1, case:2 ...)")
+            return
+        operand = "N Next Label Yes"
     elif ex == "original":
         operand = ORIGINAL_EXIT.get(kind(src), "Next Label")
     elif ex in EXITS:
@@ -344,7 +378,7 @@ def info(a):
     major = com_major_version(version)
     return {"name": safe(lambda: a.Name), "version": version, "version_major": major,
             "compatibility_mode": COMPATIBILITY_MODES.get(major, "default"), "arena_dir": arena_dir(a),
-            "edition": edition.describe(lic), "models_open": [a.Models.Item(i).FullName
+            "edition": edition.describe(lic), "models_open": [safe(lambda: a.Models.Item(i).FullName)
                                                              for i in range(1, a.Models.Count + 1)]}
 
 
@@ -414,17 +448,18 @@ def inspect(a, model, full=False, out_path=None):
         if full or not is_data:
             if t not in opcache:
                 ops = d.Operands
-                opcache[t] = [(ops.Item(j).Name, safe(lambda: ops.Item(j).DefaultValue))
+                opcache[t] = [(ops.Item(j).Name, safe(lambda: ops.Item(j).DefaultValue),
+                               bool(safe(lambda: ops.Item(j).Array, False)))
                               for j in range(1, ops.Count + 1)]
             vals = {}
-            for on, default in opcache[t]:
+            for on, default, is_array in opcache[t]:
                 v = getdata(md, on)
-                if v in (None, ""):
-                    continue
-                if full or v != default or on == "Name":
+                if v not in (None, "") and (full or v != default or on == "Name"):
                     vals[on] = v
+                if not is_array and v in (None, ""):
+                    continue  # a single-value operand with no value has no rows to read
                 r = 2
-                while True:  # repeat-group rows
+                while True:  # repeat-group rows, also when row 1 was left empty
                     v2 = getdata(md, f"{on}({r})")
                     if v2 is None:
                         break
@@ -436,7 +471,8 @@ def inspect(a, model, full=False, out_path=None):
     res = {"model": m.FullName, "modules": mods, "connections": [{"from": s, "to": d} for s, d in connection_list(m)],
            "run_setup": run_setup(m)}
     if out_path:
-        json.dump(res, open(out_path, "w", encoding="utf-8"), indent=1, default=str)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(res, f, indent=1, default=str)
         return {"wrote": os.path.abspath(out_path), "modules": len(mods), "connections": len(res["connections"])}
     return res
 
@@ -455,13 +491,9 @@ def run_setup(m):
 def apply_run_setup(m, setup, report):
     """setup: {"replications", "replication_length", "replication_length_units", "warm_up", "warm_up_units",
     "base_time_units", "hours_per_day", "terminating_condition"}; units are days|hours|minutes|seconds."""
-    props = {"replications": "NumberOfReplications", "replication_length": "ReplicationLength",
-             "replication_length_units": "ReplicationLengthTimeUnits", "warm_up": "WarmUpPeriod",
-             "warm_up_units": "WarmUpPeriodTimeUnits", "base_time_units": "BaseTimeUnits",
-             "hours_per_day": "HoursPerDay", "terminating_condition": "TerminatingCondition"}
     for k, v in (setup or {}).items():
-        if k not in props:
-            report["errors"].append(f"run setup: unknown field {k!r} (valid: {sorted(props)})")
+        if k not in SETUP_PROPS:
+            report["errors"].append(f"run setup: unknown field {k!r} (valid: {sorted(SETUP_PROPS)})")
             continue
         if k.endswith("units"):
             if str(v).lower() not in TIME_UNITS:
@@ -469,12 +501,130 @@ def apply_run_setup(m, setup, report):
                 continue
             v = TIME_UNITS[str(v).lower()]
         try:
-            setattr(m, props[k], v)
+            setattr(m, SETUP_PROPS[k], v)
         except pythoncom.com_error as e:
             report["errors"].append(f"run setup: cannot set {k}={v!r} ({e})")
 
 
+def run_setup_raw(m):
+    """The Run Setup exactly as COM reports it, to be put back after a run that changed it in memory."""
+    return {key: safe(lambda: getattr(m, prop)) for key, prop in SETUP_PROPS.items()}
+
+
 # ---------------------------------------------------------------------------------------------------- editing
+
+def module_key(ms, index):
+    """How a spec entry is referred to: its id, else its Name (connections accept either)."""
+    return ms.get("id") or ms.get("data", {}).get("Name") or f"#{index}"
+
+
+def plan_layout(spec):
+    """Default positions for modules built without an explicit x/y. A module sits one column right of the module that
+    feeds it, branches are stacked and centred around the main row, and long chains wrap into bands, so the flowchart
+    reads left to right, modules never share a point and the whole layout stays inside Arena's +-32,000 view."""
+    opts = dict(LAYOUT)
+    if isinstance(spec.get("layout"), dict):
+        opts.update(spec["layout"])
+    dx, dy = float(opts["dx"]), float(opts["dy"])
+    ox, oy = (float(v) for v in opts["origin"])
+    columns_per_band = max(1, int(opts["columns"]))
+    keys = [module_key(ms, i) for i, ms in enumerate(spec.get("modules", []))]
+    rank = {k: 0 for k in keys}
+    edges = [(c.get("from"), c.get("to")) for c in spec.get("connections", [])]
+    for _ in range(len(keys)):  # longest path in the graph; the loop stops early, and a cycle cannot run away
+        changed = False
+        for src, dst in edges:
+            if src in rank and dst in rank and rank[dst] < rank[src] + 1:
+                rank[dst] = rank[src] + 1
+                changed = True
+        if not changed:
+            break
+    columns = {}
+    for k in keys:
+        columns.setdefault(rank[k], []).append(k)
+    pos, band_top = {}, oy
+    order = sorted(columns)
+    for start in range(0, len(order), columns_per_band):
+        band = order[start:start + columns_per_band]
+        tallest = max(len(columns[col]) for col in band)
+        for i, col in enumerate(band):
+            members = columns[col]
+            for j, k in enumerate(members):
+                pos[k] = (ox + i * dx, band_top + (j - (len(members) - 1) / 2) * dy)
+        band_top += (tallest + 1) * dy  # one empty row between bands
+    return pos
+
+
+def existing_extent(m):
+    """Bounding box (left, top, right, bottom) of the flowchart modules already in the model, or None if it has none."""
+    box = None
+    for i in range(1, m.Modules.Count + 1):
+        md = m.Modules.Item(i)
+        if safe(lambda: md.Definition.DataModule, True):
+            continue
+        shape = safe(lambda: md.shape)
+        if shape is None:
+            continue
+        x0, x1 = sorted((shape.Left, shape.Right))
+        y0, y1 = sorted((shape.Top, shape.Bottom))
+        box = (min(box[0], x0), min(box[1], y0), max(box[2], x1), max(box[3], y1)) if box else (x0, y0, x1, y1)
+    return box
+
+
+def band_origin(box, dx, dy):
+    """Where an extension band starts: below the existing flowchart, else to its right, else at the origin, so the
+    new modules stay inside Arena's +-32,000 view instead of landing where no one can scroll."""
+    left, top, right, bottom = box
+    if bottom + dy <= VIEW_LIMIT:
+        return [left, bottom + dy]
+    if right + dx <= VIEW_LIMIT:
+        return [right + dx, 0]
+    return [0, 0]
+
+
+def create_views(m, views, report):
+    """Named views from a spec, so list_named_views reports the sections and screenshot_model exports each one:
+    {"name": "MAIN", "modules": ["Arrive", "Exam"], "margin": 600} or {"name": "DETAIL", "region": [x0, y0, x1, y1]}."""
+    boxes = {}
+    for i in range(1, m.Modules.Count + 1):
+        md = m.Modules.Item(i)
+        if safe(lambda: md.Definition.DataModule, True):
+            continue
+        shape = safe(lambda: md.shape)
+        if shape is not None:
+            boxes.setdefault(getdata(md, "Name"), shape)
+    made = []
+    for v in views:
+        name = safe(lambda: v.get("name"))
+        if not name:
+            report["errors"].append(f"view {v}: a name is required")
+            continue
+        try:
+            region = v.get("region")
+            if region is None:
+                margin = float(v.get("margin", 600))
+                wanted = list(v.get("modules") or [])
+                missing = [n for n in wanted if n not in boxes]
+                if missing:
+                    report["errors"].append(f"view {name}: no module named {', '.join(missing)}")
+                found = [boxes[n] for n in wanted if n in boxes]
+                if not found:
+                    report["errors"].append(f"view {name}: give region or names of existing modules")
+                    continue
+                xs = sorted([b.Left for b in found] + [b.Right for b in found])
+                ys = sorted([b.Top for b in found] + [b.Bottom for b in found])
+                region = [xs[0] - margin, ys[0] - margin, xs[-1] + margin, ys[-1] + margin]
+            x0, y0, x1, y1 = (float(x) for x in region)
+            if not (x0 < x1 and y0 < y1):
+                report["errors"].append(f"view {name}: region needs increasing bounds")
+                continue
+            m.NamedViews.Create(name, "V", x0, y0, x1, y1)
+        except (pythoncom.com_error, AttributeError, TypeError, ValueError) as e:
+            report["errors"].append(f"view {name}: {e}")
+            continue
+        made.append({"name": name, "region": [x0, y0, x1, y1]})
+    return made
+
 
 def build(a, spec):
     """Build a new model from a spec, or extend "base" and save it as "save_as". See the skill's spec reference."""
@@ -493,10 +643,12 @@ def build(a, spec):
     if "base" in spec:
         m = open_model(a, spec["base"])
         if "save_as" in spec:
+            os.makedirs(os.path.dirname(os.path.abspath(spec["save_as"])), exist_ok=True)  # a new folder is fine
             m.SaveAs(os.path.abspath(spec["save_as"]))  # never touch the base file
     else:
         if "save_as" not in spec:
             return {"error": "a new model needs save_as (where to save the .doe)", "model_changed": False}
+        os.makedirs(os.path.dirname(os.path.abspath(spec["save_as"])), exist_ok=True)
         m = a.Models.Add()
         m.SaveAs(os.path.abspath(spec["save_as"]))
     m.Activate()
@@ -525,7 +677,15 @@ def build(a, spec):
         for what, ns in zip(DECLARERS, used_names(items, t)):
             found[what] |= ns
 
-    for ms in spec.get("modules", []):
+    overrides = spec.get("layout") if isinstance(spec.get("layout"), dict) else {}
+    if "base" in spec and "origin" not in overrides:
+        # extending a model: put the new modules in a clear band below (or beside) what the model already shows
+        box = existing_extent(m)
+        if box is not None:
+            overrides = dict(overrides, origin=band_origin(box, float(overrides.get("dx", LAYOUT["dx"])),
+                                                           float(overrides.get("dy", LAYOUT["dy"]))))
+    positions = plan_layout(dict(spec, layout=overrides))  # x/y of every module the spec does not place itself
+    for index, ms in enumerate(spec.get("modules", [])):
         name = ms.get("data", {}).get("Name")
         if name and name in existing:
             report["errors"].append(f"module {name!r} already exists; use 'updates' to change it")
@@ -538,8 +698,8 @@ def build(a, spec):
             report["errors"].append(f"module {name or ms.get('id')}: {e}")
             continue
         n_before = m.Modules.Count
-        mod = m.Modules.Create(panel, d, ms.get("x", 1000 + 1600 * (n_added % 12)),
-                               ms.get("y", 1000 + 1600 * (n_added // 12)))
+        px, py = positions.get(module_key(ms, index), (1000 + 1600 * (n_added % 12), 1000 + 1600 * (n_added // 12)))
+        mod = m.Modules.Create(panel, d, ms.get("x", px), ms.get("y", py))
         own = safe(lambda: mod.shape.SerialNumber)
         sides = []
         for j in range(n_before + 1, m.Modules.Count + 1):  # data modules Arena adds by itself (Entity, File, Queue ...)
@@ -574,9 +734,12 @@ def build(a, spec):
         collect(items, ms["type"])
     for u in spec.get("updates", []):
         collect(expand(u), kind(existing[u["name"]]) if u["name"] in existing else "")
-    dx, dy = spec.get("declare_at", [0, -4000])
+    start = list(spec.get("declare_at") or [0, -4000])[:2]
+    if len(start) < 2:
+        start = [0, -4000]
+    cursor = [start[0], start[1], 0]  # placement cursor [x0, y0, count] for the auto-declared data modules
     for what in DECLARERS:
-        declare(a, m, existing, found[what], what, dx, dy, report)
+        declare(a, m, existing, found[what], what, cursor, report)
     for k, mod in existing.items():  # connections may name existing modules too
         made.setdefault(k, mod)
     for c in spec.get("connections", []):
@@ -586,18 +749,25 @@ def build(a, spec):
         connect(m, made, c, report)
     for sh in spec.get("shapes", []):  # drawing only: titles over groups of modules
         try:
-            m.Shapes.CreateText(sh["x"], sh["y"], sh["text"], sh.get("font", "Arial"), sh.get("height", 300), 0,
-                                bool(sh.get("bold", True)), False, False)
+            # "level" keeps one type hierarchy across the drawing: title, section, note (or an explicit height)
+            height = sh.get("height") or TEXT_LEVELS.get(sh.get("level", "section"), TEXT_LEVELS["section"])
+            m.Shapes.CreateText(sh["x"], sh["y"], sh["text"], sh.get("font", "Arial"), height,
+                                sh.get("angle", 0), bool(sh.get("bold", True)), bool(sh.get("italic", False)),
+                                bool(sh.get("underline", False)))
         except (pythoncom.com_error, KeyError) as e:
             report["errors"].append(f"shape {sh}: {e}")
     if spec.get("delete"):
         report["deleted"] = []
         delete_modules(m, spec["delete"], report)
     report["warnings"].extend(layout_warnings(m))
+    if spec.get("views"):  # named views make each section readable in list_named_views / screenshot_model
+        report["views"] = create_views(m, spec["views"], report)
     if spec.get("check", True):  # compile after deletes, so dropped connections and errors show up now, not later
         report["check_errors"], report["dropped_connections"] = check_model(m)
         report["ok"] = not report["errors"] and not report["dropped_connections"] and not any(
             e.get("level") != "warning" for e in report["check_errors"])
+    else:
+        report["ok"] = not report["errors"]  # not compiled on request: only the build itself is reported
     m.Save()
     return {"model": m.FullName, "modules_added": n_added, "connections": m.Connections.Count, "auto_created": auto,
             **report}
@@ -612,14 +782,19 @@ def delete_modules(m, names, report):
         if mod is None:
             report["errors"].append(f"delete: no module named {n!r}")
             continue
+        shape = safe(lambda: mod.shape)
+        if shape is None:
+            report["errors"].append(f"delete: {n!r} has no shape in the flowchart")
+            continue
         sel.DeselectAll()
-        sel.Add(mod.shape)
+        sel.Add(shape)
         sel.Delete()
         report["deleted"].append(n)
 
 
 def delete(a, model, names):
     m = open_model(a, model)
+    m.Activate()  # Selection and Delete act on the model's active view, so it has to be the active one
     report = {"errors": [], "deleted": []}
     delete_modules(m, names, report)
     m.Save()
@@ -633,10 +808,11 @@ def close(a, models=None):
     want = [os.path.abspath(p).lower() for p in models or []]
     for i in range(a.Models.Count, 0, -1):
         m = a.Models.Item(i)
-        if not want or m.FullName.lower() in want:
-            name = m.FullName
+        full = safe(lambda: m.FullName) or ""
+        if not want or full.lower() in want:
+            name = full
             try:
-                m.QuietMode = True
+                safe(lambda: setattr(m, "QuietMode", True))  # a missing property must not abort the close
                 m.Close()
                 closed.append(name)
             except pythoncom.com_error as e:
@@ -661,8 +837,9 @@ def set_data(a, model, module, data, save=True):
                 "model_changed": False}
     apply_data(mod, items, report, module)
     existing = modules_by_name(m)
+    cursor = [0, -4000, 0]  # declared data modules are spread out, never stacked on one point
     for names, what in zip(used, DECLARERS):
-        declare(a, m, existing, names, what, 0, -4000, report)
+        declare(a, m, existing, names, what, cursor, report)
     if save:
         m.Save()
     return {"model": m.FullName, "module": module, "saved": save, **report}
@@ -682,7 +859,10 @@ def setup(a, model, run_setup_fields, save=True):
 def read_err(m):
     """Arena writes check/run errors to <model>.err as binary records: a 4-byte shape serial number 20 bytes before
     the source tag (MODVAL, ...), then the message. Returns [{"module", "type", "message"}]."""
-    p = os.path.splitext(m.FullName)[0] + ".err"
+    path = safe(lambda: m.FullName)
+    if not path:  # an unsaved model has no report file
+        return []
+    p = os.path.splitext(path)[0] + ".err"
     if not os.path.exists(p) or not os.path.getsize(p):
         return []
     return parse_err(open(p, "rb").read(), module_serials(m))
@@ -745,7 +925,9 @@ def layout_warnings(model):
         module = model.Modules.Item(i)
         if safe(lambda: module.Definition.DataModule, True):
             continue
-        shape = module.shape
+        shape = safe(lambda: module.shape)
+        if shape is None:
+            continue
         x0, x1 = sorted((shape.Left, shape.Right))
         y0, y1 = sorted((shape.Top, shape.Bottom))
         bounds.append((getdata(module, "Name"), x0, y0, x1, y1))
@@ -812,7 +994,7 @@ def end_other_runs(a):
         other = a.Models.Item(i)
         if safe(lambda: other.State, 0) != 0:
             safe(lambda: other.End())
-            ended.append(other.Name)
+            ended.append(safe(lambda: other.Name) or "(unnamed model)")
     return ended
 
 
@@ -832,9 +1014,14 @@ def _run_once(a, m, show, outputs, per_replication=False):
 
 
 def _run_batch(m, ended_first, show, outputs, per_replication, legacy=False):
-    m.QuietMode = True
-    m.BatchMode = True
+    # Batch settings belong to this run: a model left in batch mode afterwards behaves oddly in the Arena GUI.
+    with temporary_settings(m, QuietMode=True, BatchMode=True):
+        return _run_batch_locked(m, ended_first, show, outputs, per_replication, legacy)
+
+
+def _run_batch_locked(m, ended_first, show, outputs, per_replication, legacy):
     t0 = time.time()
+    model_path = safe(lambda: m.FullName) or ""  # an unsaved model has no report beside it
     if legacy:
         m.Go(2)  # smGoReturn keeps the COM apartment responsive on Arena 14.
         start_deadline = time.monotonic() + 15
@@ -855,31 +1042,34 @@ def _run_batch(m, ended_first, show, outputs, per_replication, legacy=False):
         res["errors"].append({"level": "error", "message": "the run did not start (no SIMAN run state after Go)"})
     elif legacy and state != 12:  # smStateRunComplete
         res["errors"].append({"level": "error", "message": f"Arena 14 run stopped before completion (State {state})"})
-    p = os.path.splitext(m.FullName)[0] + ".err"
+    p = os.path.splitext(model_path)[0] + ".err"
     fresh = lambda: os.path.exists(p) and os.path.getmtime(p) > t0  # noqa: E731
     if fresh():
         res["errors"].extend(read_err(m))
     if show:  # read before End(), which resets the run; a bad expression writes its own record to .err
-        n_before = len(res["errors"])
+        before_show = read_err(m) if fresh() else []
         res["values"] = {e: evaluate(m, e) for e in show}
-        after = read_err(m) if fresh() else []
-        if len(after) > n_before:
-            res["show_errors"] = after[n_before:]
+        after_show = read_err(m) if fresh() else []
+        if len(after_show) > len(before_show):  # only what evaluating the expressions added
+            res["show_errors"] = after_show[len(before_show):]
     if safe(lambda: m.AreDemoLimitsExceeded):
         res["edition_limit_exceeded"] = True
         res["errors"].append({"level": "error", "message": edition.LIMIT_MESSAGE})
     safe(lambda: m.End())
-    if safe(lambda: m.State, 0) != 0:  # still in run mode: the next run of any model would stall
-        res["errors"].append({"level": "error", "message": f"model still in run mode after End() (State {m.State})"})
+    left_state = safe(lambda: m.State, 0)
+    if left_state != 0:  # still in run mode: the next run of any model would stall
+        res["errors"].append({"level": "error",
+                              "message": f"model still in run mode after End() (State {left_state})"})
     if outputs:
-        r = resultsmod.read(m.FullName, t0, per_replication, text_only=legacy)
+        r = (resultsmod.read(model_path, t0, per_replication, text_only=legacy) if model_path
+             else {"source": None, "statistics": {}, "note": "the model has no saved path, so no report was read"})
         res["results_source"] = r["source"]
         res["statistics"] = r["statistics"]
         if r.get("note"):
             res["results_note"] = r["note"]
         if legacy and r["source"] is None and not res["errors"]:
             res["errors"].append({"level": "error", "message": "Arena 14 did not write a fresh SIMAN text report with statistics"})
-    lic = resultsmod.report_license(m.FullName)
+    lic = resultsmod.report_license(model_path) if model_path else None
     if lic:  # the text report names the license ("STUDENT"); remember it, it tells Student from lab licenses apart
         res["report_license"] = lic
         edition.remember_report_license(lic)
@@ -921,15 +1111,18 @@ def run(a, model, reps=None, setup_fields=None, changes=None, show=None, outputs
     report = {"errors": [], "warnings": []}
     if reps:
         setup_fields = dict(setup_fields or {}, replications=reps)
-    old_setup = run_setup(m)
+    old_setup = run_setup_raw(m)
     apply_run_setup(m, setup_fields, report)
     old = _apply_in_memory(m, changes, report)
     try:
         res = _run_once(a, m, show, outputs, per_replication)
     finally:
         _restore(m, old)
-        if setup_fields:
-            apply_run_setup(m, {k: old_setup[k] for k in setup_fields if old_setup.get(k) is not None}, {"errors": []})
+        if setup_fields:  # put back the exact COM values the model had before this run
+            for key in setup_fields:
+                value = old_setup.get(key)
+                if key in SETUP_PROPS and value is not None:
+                    safe(lambda: setattr(m, SETUP_PROPS[key], value))
     res["errors"] = [{"level": "error", "message": e} if isinstance(e, str) else e for e in report["errors"]] + res[
         "errors"]
     res["ok"] = res["ok"] and not report["errors"]
