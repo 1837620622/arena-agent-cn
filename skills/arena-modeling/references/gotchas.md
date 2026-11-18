@@ -94,8 +94,10 @@ Background and evidence for each: `arena_guide("discoveries")`.
   `screenshot_model` checks that the displayed area covers the requested tile and retries before capturing. If the
   view still misses the tile, it reports the affected region.
 - Animation frames: `capture_animation_frame` plays and pauses at one simulation time (`BreakOnTime`);
-  `capture_animation_frames` repeats it for a list of increasing times. Arena 14 cannot resume a paused animation
-  through COM, so every frame replays the run from zero — sample 5 to 8 key moments (start, first queue, steady
+  `capture_animation_frames` repeats it for a list of increasing times. Times must be greater than zero — Arena
+  cannot break at time 0, so the first sample is a small positive time. Both end a stale run first, because a model
+  left in run mode blocks playback (12) and every frame of a series replays the run. Arena 14 cannot resume a paused
+  animation through COM, so every frame replays from zero — sample 5 to 8 key moments (start, first queue, steady
   state, a status switch, the end) rather than a dense series. When a run cannot reach the time, lower `speed` so the
   tool has time to set the breakpoint, and raise `timeout` for long runs. A visible jump between two frames is either
   a model event (a resource turning busy, a batching release) or too coarse a time step: compare the printed clock in

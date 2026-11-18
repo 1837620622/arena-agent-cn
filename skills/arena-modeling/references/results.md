@@ -23,6 +23,10 @@ Kinds and typical names:
 `measures=["Waiting", "Utilization"]` keeps only matching statistics. `get_results` reads the last run again without
 running.
 
+Records read from the Arena 14 text report (`<model>.out`) keep Arena's own identifiers and column names: they carry
+`section` and `reps`, and the values under `value`, `count`, `limit` or `average`, instead of `kind`/`source`. Read
+them as Arena printed them; the database records above are the uniform shape.
+
 ## Choosing run settings
 
 - **Terminating systems** (a clinic day, a shift): replication length = the day; no warm-up; replications = days.

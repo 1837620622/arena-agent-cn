@@ -111,7 +111,7 @@ arena-agent screenshot existing.doe upstream.png --view "ARRIVAL_UPSTREAM" --ppu
 ```powershell
 arena-agent views "E:\work\animation.doe"
 arena-agent animation-frame "E:\work\animation.doe" "E:\work\at80.png" --view "ANIMATION" --time 80
-arena-agent animation-frames "E:\work\animation.doe" "E:\work\frames" --view "ANIMATION" --time 0 20 40 60 80
+arena-agent animation-frames "E:\work\animation.doe" "E:\work\frames" --view "ANIMATION" --time 5 20 40 60 80
 ```
 
 MCP 的同一操作接受下列参数。
@@ -127,7 +127,7 @@ MCP 的同一操作接受下列参数。
 }
 ```
 
-- `simulation_time` 使用模型的基本时间单位。模型必须在此次重复中能到达指定时刻。非常靠近零的时刻可降低 `speed`，让工具有时间设置断点。
+- `simulation_time` 使用模型的基本时间单位，必须大于零（Arena 无法在时刻 0 设断点，第一个时刻取一个小的正数）。模型必须在此次重复中能到达指定时刻。非常靠近零的时刻可降低 `speed`，让工具有时间设置断点。
 - `speed` 是 Arena 的播放速度设置，`timeout` 是墙钟等待时间（秒）。模型已有活动运行时先结束原运行。自动截图完成后结束这次临时运行并恢复选项。
 - 需要保留当前动画状态时，先在 Arena 中显示完整目标视图并暂停，再调用 `screenshot_model`。暂停态使用原生单帧，保持当前视野。需要更大分辨率时先增大可用绘图区。
 - `capture_animation_frames` 按递增时刻成组导出。Arena 14 的暂停不能通过 COM 续播，每一帧都从零重放一次，所以取 5 到 8 个关键时刻（起始、首次排队、稳态、状态切换、结束）比抓几十帧更能看出运动是否连贯。相邻两帧之间出现跳跃时，先比对两帧上的仿真时钟，再判断是模型事件还是播放丢帧。
@@ -137,7 +137,7 @@ MCP 的同一操作接受下列参数。
 
 排版先在建模规格里定好，再靠导图核对，顺序比事后修图省事。
 
-- **位置**：没有写 `x`、`y` 的模块按连接图排布——跟着上游模块向右一列，分支上下居中，长链折行成带；`layout` 可调 `dx`、`dy`、`columns`、`origin`（缺省 2600 x 1800，12 列一带）。显式坐标优先，仍受 ±32,000 的视图范围限制。工具自动声明的属性、变量、队列、资源和实体类型按 6 列网格从 `declare_at` 排开，不会叠成一团。
+- **位置**：没有写 `x`、`y` 的模块按连接图排布——跟着上游模块向右一列，分支上下居中，长链折行成带；`layout` 可调 `dx`、`dy`、`columns`、`origin`（缺省 2600 x 1800，12 列一带）。排布结果会整体收进 ±32,000 的视图范围，压缩时在 `warnings` 里说明；显式坐标优先，但仍受同一范围限制。工具自动声明的属性、变量、队列、资源和实体类型按 6 列网格从 `declare_at` 排开，不会叠成一团。
 - **字号层级**：`shapes` 的 `level` 提供三级：`title`（700 模型单位）、`section`（480，缺省）、`note`（320），`height` 可覆盖；`font`、`angle`、`italic`、`underline`、`bold` 直传 Arena。同一张图只用一种字体（Arial 或 Segoe UI）和一套层级，标题、区域名、注释不要混用字号。
 - **命名视图**：`views` 按业务区域保存视图，给 `modules` 就按真实模块边界加 `margin` 计算，给 `region` 就用给定矩形。导图按视图名导出，分区图与整图都能对上同一块区域。
 - **导图比例**：缺省区域是流程图模块加上附近 5,000 单位内的文字标题，远处孤立的图形不计入，只有声明没有流程图模块时按数据模块导出。缺省比例不低于 Arena 当前缩放，导图前先把 Arena 缩放到要交付的清晰度；区域大就提高 `max_tiles`（命令行 `--tiles`）分块拼接，只有块数超过上限才按比例降一档，不要靠降比例换整图。显式给 `pixels_per_unit` 时严格照办，超出块数或单张 1.2 亿像素上限会直接报错。缩小用 LANCZOS 保笔画，放大用 BICUBIC 防锯齿。

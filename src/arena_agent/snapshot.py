@@ -14,7 +14,8 @@ import win32con
 import win32gui
 from PIL import Image, ImageGrab
 
-from .core import ARENA_14, ArenaError, com_major_version, named_view_regions, open_model, safe, temporary_settings
+from .core import (ARENA_14, ArenaError, com_major_version, end_other_runs, named_view_regions, open_model, safe,
+                   temporary_settings)
 
 VIEW_SETTINGS = {"SplitScreen": True, "SplitScreenPercent": 99, "Grid": False, "ShowRulers": False,
                  "ShowGuides": False, "ShowPageBreaks": False}
@@ -233,6 +234,10 @@ def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64, *, view_na
         if view_name not in views:
             raise ArenaError(f"unknown named view {view_name!r}; available views: {', '.join(views) or '(none)'}")
         region = views[view_name]
+    try:
+        ppu = None if ppu is None else float(ppu)
+    except (TypeError, ValueError):
+        raise ArenaError("screenshot pixels per unit must be a number")
     if ppu is not None and (not math.isfinite(ppu) or ppu <= 0):
         raise ArenaError("screenshot pixels per unit must be positive and finite")
     try:
@@ -242,9 +247,14 @@ def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64, *, view_na
     if max_tiles < 1:
         raise ArenaError("screenshot max_tiles must be at least 1")
     if region is not None:
-        if len(region) != 4 or not all(math.isfinite(float(value)) for value in region):
+        try:
+            region = tuple(float(value) for value in region)
+        except (TypeError, ValueError):
+            raise ArenaError("screenshot region must be four numbers: X0 Y0 X1 Y1")
+        if len(region) != 4:
+            raise ArenaError("screenshot region must contain four coordinates: X0 Y0 X1 Y1")
+        if not all(math.isfinite(value) for value in region):
             raise ArenaError("screenshot region must contain four finite coordinates")
-        region = tuple(float(x) for x in region)
         if not (region[0] < region[2] and region[1] < region[3]):
             raise ArenaError("screenshot region must have increasing x and y bounds")
     elif state not in RUN_FRAME_STATES:
@@ -256,8 +266,8 @@ def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64, *, view_na
     v = m.ActiveView
     top, child, pane = model_window(m.Name)
     if state in RUN_FRAME_STATES:
-        canvas, region = _capture_run_frame(v, pane, region, ppu)
-        tiles, used_ppu = 1, ppu
+        canvas, region, used_ppu = _capture_run_frame(v, pane, region, ppu)
+        tiles = 1
     else:
         with _export_view(v, top, child):
             canvas, tiles, used_ppu = _capture_tiles(v, pane, region, ppu, max_tiles)
@@ -295,7 +305,8 @@ def _capture_run_frame(view, pane, region, ppu):
         if size[0] > image.width or size[1] > image.height:
             raise ArenaError("the paused animation can only be exported at its on-screen resolution or smaller")
         image = _resample(image, size)
-    return image, region
+    # 暂停帧只能按屏幕分辨率裁剪，把实际得到的比例报回去，才知道这张图够不够清晰。
+    return image, region, image.width / max(x1 - x0, 1e-9)
 
 
 def _capture_tiles(v, pane, region, ppu, max_tiles):
@@ -350,6 +361,10 @@ def _capture_tiles(v, pane, region, ppu, max_tiles):
 
 def capture_animation_frame(a, model, out_path, view_name, simulation_time, *, speed=0.5, timeout=120):
     """在 Arena 14 中播放至指定仿真时刻，导出二维动画原生帧。"""
+    try:
+        simulation_time, speed, timeout = float(simulation_time), float(speed), float(timeout)
+    except (TypeError, ValueError):
+        raise ArenaError("simulation time, speed and timeout must be numbers")
     for label, value in (("simulation time", simulation_time), ("speed", speed), ("timeout", timeout)):
         if not math.isfinite(value) or value <= 0:
             raise ArenaError(f"{label} must be positive and finite")
@@ -357,8 +372,9 @@ def capture_animation_frame(a, model, out_path, view_name, simulation_time, *, s
         raise ArenaError("animation frame output must end in .png")
     if com_major_version(a.Version) != ARENA_14:
         raise ArenaError("automated animation playback currently supports Arena 14")
-    if any(a.Models.Item(i).State for i in range(1, a.Models.Count + 1)):
-        raise ArenaError("end the active Arena run before starting animation playback")
+    ended_first = end_other_runs(a)  # a model left in run mode blocks playback, and every frame of a series runs
+    if any(safe(lambda: a.Models.Item(i).State, 0) for i in range(1, a.Models.Count + 1)):
+        raise ArenaError("an Arena run is still active; end it in Arena before starting animation playback")
 
     _dpi_aware()
     m = open_model(a, model)
@@ -391,11 +407,13 @@ def capture_animation_frame(a, model, out_path, view_name, simulation_time, *, s
                 time.sleep(0.05)
                 state = m.State
             current_time = safe(lambda: m.SIMAN.RunCurrentTime)
-            if state != 16 or current_time is None or not math.isclose(current_time, simulation_time, abs_tol=1e-7):
+            if state != 16 or current_time is None or not math.isclose(current_time, simulation_time, rel_tol=1e-9,
+                                                                      abs_tol=1e-9):
                 raise ArenaError(f"Arena stopped at simulation time {current_time} (state {state}), "
                                  f"expected {simulation_time:g}; check the model or increase the timeout")
             result = snapshot(a, model, out_path, view_name=view_name)
-            return {**result, "simulation_time": current_time}
+            return {**result, "simulation_time": current_time,
+                    **({"ended_first": ended_first} if ended_first else {})}
         finally:
             if m.State:
                 m.End()
@@ -408,11 +426,20 @@ def capture_animation_frames(a, model, out_dir, view_name, times, *, speed=0.5, 
     5 到 8 个关键时刻比一次抓几十帧更能看出运动方向和停顿。timeout 是每一帧的墙钟上限。
     """
     times = list(times)
-    values = sorted({float(t) for t in times})
+    try:
+        values = sorted({float(t) for t in times})
+    except (TypeError, ValueError):
+        raise ArenaError("simulation times must be numbers")
     if not values:
         raise ArenaError("give at least one simulation time")
     if len(values) != len(times):
         raise ArenaError("simulation times must be distinct")
+    if not all(math.isfinite(v) and v > 0 for v in values):
+        raise ArenaError("simulation times must be greater than zero: Arena cannot break at time 0, so start at a "
+                         "small positive time")
+    prefix = str(prefix or "frame")
+    if not prefix.strip() or any(ch in prefix for ch in '\\/:*?"<>|'):
+        raise ArenaError('prefix must be a plain file name, without path separators or \\ / : * ? " < > |')
     os.makedirs(out_dir, exist_ok=True)
     frames = []
     for t in values:

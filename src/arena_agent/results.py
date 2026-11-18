@@ -75,7 +75,8 @@ def read_db(path, per_replication=False):
         if not reports:
             return {}
         if latest is None:
-            latest = max(when for when, _, _ in reports)
+            known = [when for when, _, _ in reports if when is not None]
+            latest = max(known) if known else None
 
         res = {}
         for when, k, rows in reports:
@@ -96,8 +97,10 @@ def read_db(path, per_replication=False):
 
 
 def drop_empty(res):
-    """Leave out statistics with no observations in any replication (unused entity types and the like)."""
-    return {k: v for k, v in res.items() if not (v["n"] == 0 or (v["kind"] == "tally" and v["average"] is None))}
+    """Leave out statistics with no observations in any replication (unused entity types and the like). Records from
+    the text report carry a `section` instead of a `kind`, so nothing here may index a key blindly."""
+    return {k: v for k, v in res.items()
+            if v.get("n") != 0 and not (v.get("kind") == "tally" and v.get("average") is None)}
 
 
 def read(model_path, since=0, per_replication=False, include_empty=False, *, text_only=False):
@@ -175,7 +178,9 @@ def parse_out(txt):
         section = None
         for line in tail.splitlines():
             head = line.strip()
-            if head.isupper() and head.replace(" ", "").replace("-", "").isalpha():
+            # 表头行 "Identifier  Average  Half-width ..." 也是全字母，不能当成区段名。
+            if (head.isupper() and not head.lower().startswith("identifier")
+                    and head.replace(" ", "").replace("-", "").isalpha()):
                 section = head.title()
                 continue
             mm = re.match(r"^(\S[^\n]*?)\s{2,}" + r"\s+".join([NUM] * 4) + r"\s+(\d+)\s*$", line)

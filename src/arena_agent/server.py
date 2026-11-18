@@ -109,7 +109,11 @@ def build_model(spec: dict[str, Any] | None = None, spec_path: str | None = None
     if spec is None and spec_path is None:
         return {"error": "pass spec or spec_path"}
     if spec is None:
-        spec = json.load(open(spec_path, encoding="utf-8"))
+        try:
+            with open(spec_path, encoding="utf-8") as f:
+                spec = json.load(f)
+        except (OSError, ValueError) as e:
+            return {"error": f"cannot read the spec file: {type(e).__name__}: {e}"}
     return _guard(core.build, spec)
 
 

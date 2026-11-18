@@ -60,6 +60,9 @@ one, sets every module, declares the names they use, connects them, compiles and
   branches stacked and centred around the main row, long chains wrapped into bands. `layout` tunes it (`dx`, `dy`,
   `columns` per band, `origin`); the default 2600 x 1800 leaves room for labels and route lines. Extending a model
   (`base`) puts the new band below the existing flowchart, or beside it when below would leave Arena's +-30,000 view.
+  A layout that would run past that view (a big model, or a column with many branches) is moved and compressed to fit,
+  and the build result says so in `warnings`; split such a model into named views instead of shrinking the spacing
+  further. Coordinates from the spec are rounded to whole model units, which is what Arena's COM methods take.
 - Data modules (Resource, Variable, Queue, Entity, Attribute, Expression, Statistic, Schedule ...) need no x/y.
   Names declared automatically are laid out in a 6-wide grid from `declare_at`, so they never stack on one point.
 

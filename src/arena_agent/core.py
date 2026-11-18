@@ -236,9 +236,9 @@ def expand(ms, *, flat_record=False):
     """A module spec's data as an ordered list of (operand, value). "rows" lists repeat-group rows in order:
     {"rows": [{"Type": "Attribute", "AName": "x", "Value": "1"}, ...]} -> Type(1), AName(1), Value(1), Type(2) ...
     "cases" does the same for N-way Decide conditions (N If, N Value), "resources" for Process resources."""
-    items = list(ms.get("data", {}).items())
+    items = list((ms.get("data") or {}).items())
     for key in ("rows", "cases", "resources"):
-        for i, row in enumerate(ms.get(key, []), 1):
+        for i, row in enumerate(ms.get(key) or [], 1):
             if key == "rows" and flat_record:
                 if i > 1:
                     raise ArenaError("This Record template takes one row. Use a separate Record module for each statistic.")
@@ -273,7 +273,8 @@ def apply_data(mod, items, report, label):
         allowed = CHOICES.get((t, base))
         if allowed is not None and got not in allowed:
             report["errors"].append(f"{label}: {k}={v!r} is not a valid choice (stored {got!r}; valid {sorted(allowed)})")
-        elif allowed is None and got is not None and got != v and k != "Name" and                 MAPPED.get((t, base), {}).get(v) != got:
+        elif (allowed is None and got is not None and got != v and k != "Name"
+              and MAPPED.get((t, base), {}).get(v) != got):
             report["warnings"].append(f"{label}: {k} set to {v!r} but reads back {got!r}")
 
 
@@ -321,6 +322,16 @@ def declare_position(at):
     return x0 + (i % DECLARE_COLUMNS) * DECLARE_STEP[0], y0 - (i // DECLARE_COLUMNS) * DECLARE_STEP[1]
 
 
+def declare_origin(value):
+    """[x0, y0] where the auto-declared data-module grid starts. Model coordinates are whole units: a float from the
+    spec (or a text one) would reach Arena's COM method as the wrong type, so fall back to the default instead."""
+    try:
+        x0, y0 = (int(round(float(v))) for v in list(value or [])[:2])
+        return [x0, y0]
+    except (TypeError, ValueError):
+        return [0, -4000]
+
+
 def declare(a, m, existing, names, what, at, report):
     """Create Attribute / Variable / Queue / Resource / Entity data modules for names the model does not define yet."""
     pn, tn = DECLARERS[what]
@@ -338,15 +349,15 @@ def declare(a, m, existing, names, what, at, report):
 
 
 def connect(m, made, c, report):
-    src, dst = made[c["from"]], made[c["to"]]
-    ex = c.get("exit", "next").lower()
+    src, dst = made.get(c.get("from")), made.get(c.get("to"))
+    ex = str(c.get("exit") or "next").lower()
     idx = None
     if ex.startswith("case"):
         try:
             idx = int(ex.split(":")[1])
         except (IndexError, ValueError):
-            report["errors"].append(f"connect {c['from']} -> {c['to']}: exit {ex!r} must be case:N with a condition "
-                                    f"number (case:1, case:2 ...)")
+            report["errors"].append(f"connect {c.get('from')} -> {c.get('to')}: exit {ex!r} must be case:N with a "
+                                    f"condition number (case:1, case:2 ...)")
             return
         operand = "N Next Label Yes"
     elif ex == "original":
@@ -354,7 +365,7 @@ def connect(m, made, c, report):
     elif ex in EXITS:
         operand = EXITS[ex]
     else:
-        report["errors"].append(f"connect {c['from']} -> {c['to']}: unknown exit {ex!r} (valid: {sorted(EXITS)}, "
+        report["errors"].append(f"connect {c.get('from')} -> {c.get('to')}: unknown exit {ex!r} (valid: {sorted(EXITS)}, "
                                 f"case:N, original)")
         return
     last = None
@@ -367,7 +378,7 @@ def connect(m, made, c, report):
             return
         except pythoncom.com_error as e:
             last = e
-    report["errors"].append(f"connect {c['from']} -[{ex}]-> {c['to']}: {last}")
+    report["errors"].append(f"connect {c.get('from')} -[{ex}]-> {c.get('to')}: {last}")
 
 
 # ---------------------------------------------------------------------------------------------------- information
@@ -515,22 +526,23 @@ def run_setup_raw(m):
 
 def module_key(ms, index):
     """How a spec entry is referred to: its id, else its Name (connections accept either)."""
-    return ms.get("id") or ms.get("data", {}).get("Name") or f"#{index}"
+    return ms.get("id") or (ms.get("data") or {}).get("Name") or f"#{index}"
 
 
-def plan_layout(spec):
+def plan_layout(spec, notes=None):
     """Default positions for modules built without an explicit x/y. A module sits one column right of the module that
     feeds it, branches are stacked and centred around the main row, and long chains wrap into bands, so the flowchart
-    reads left to right, modules never share a point and the whole layout stays inside Arena's +-32,000 view."""
+    reads left to right and modules never share a point. `notes`, when given, collects a warning if the drawing had to
+    be compressed to stay inside Arena's view."""
     opts = dict(LAYOUT)
     if isinstance(spec.get("layout"), dict):
         opts.update(spec["layout"])
     dx, dy = float(opts["dx"]), float(opts["dy"])
     ox, oy = (float(v) for v in opts["origin"])
     columns_per_band = max(1, int(opts["columns"]))
-    keys = [module_key(ms, i) for i, ms in enumerate(spec.get("modules", []))]
+    keys = [module_key(ms, i) for i, ms in enumerate(spec.get("modules") or [])]
     rank = {k: 0 for k in keys}
-    edges = [(c.get("from"), c.get("to")) for c in spec.get("connections", [])]
+    edges = [(c.get("from"), c.get("to")) for c in spec.get("connections") or []]
     for _ in range(len(keys)):  # longest path in the graph; the loop stops early, and a cycle cannot run away
         changed = False
         for src, dst in edges:
@@ -552,7 +564,29 @@ def plan_layout(spec):
             for j, k in enumerate(members):
                 pos[k] = (ox + i * dx, band_top + (j - (len(members) - 1) / 2) * dy)
         band_top += (tallest + 1) * dy  # one empty row between bands
-    return pos
+    return fit_to_view(pos, dx, dy, notes)
+
+
+def fit_to_view(pos, dx, dy, notes=None):
+    """Keep the whole flow inside Arena's 16-bit view. A large model laid out at the requested spacing runs past
+    +-32,000, where the GUI cannot scroll to it at all; the layout is moved and compressed to fit instead, and the
+    caller reports that it was. Coordinates come back as whole model units."""
+    if not pos:
+        return pos
+    limit = VIEW_LIMIT - 1500  # a module box and its label need room of their own
+    xs = [p[0] for p in pos.values()]
+    ys = [p[1] for p in pos.values()]
+    x0, x1 = min(xs) - dx / 2, max(xs) + dx / 2
+    y0, y1 = min(ys) - dy / 2, max(ys) + dy / 2
+    sx = min(1.0, 2 * limit / max(x1 - x0, 1.0))
+    sy = min(1.0, 2 * limit / max(y1 - y0, 1.0))
+    if (sx < 1 or sy < 1) and notes is not None:
+        notes.append(f"layout: compressed to {sx:.0%} across and {sy:.0%} down so the whole flow stays inside "
+                     f"Arena's view (-32,000 to 32,000); split the model into named views or lower dx/dy for a "
+                     f"clearer drawing")
+    if sx < 1 or sy < 1:
+        pos = {k: (x0 + (x - x0) * sx - limit, y0 + (y - y0) * sy - limit) for k, (x, y) in pos.items()}
+    return {k: (int(round(x)), int(round(y))) for k, (x, y) in pos.items()}
 
 
 def existing_extent(m):
@@ -614,7 +648,7 @@ def create_views(m, views, report):
                 xs = sorted([b.Left for b in found] + [b.Right for b in found])
                 ys = sorted([b.Top for b in found] + [b.Bottom for b in found])
                 region = [xs[0] - margin, ys[0] - margin, xs[-1] + margin, ys[-1] + margin]
-            x0, y0, x1, y1 = (float(x) for x in region)
+            x0, y0, x1, y1 = (int(round(float(x))) for x in region)
             if not (x0 < x1 and y0 < y1):
                 report["errors"].append(f"view {name}: region needs increasing bounds")
                 continue
@@ -631,9 +665,14 @@ def build(a, spec):
     if isinstance(spec, str):
         spec = json.load(open(spec, encoding="utf-8"))
     report = {"errors": [], "warnings": [], "declared": []}
+    declared = spec.get("declare") or {}
+    for key in ("base", "save_as"):
+        if key in spec and not isinstance(spec[key], str):
+            return {"error": f"{key} must be a path string", "model_changed": False}
     # refuse SIMAN reserved words before touching any model (they compile with a warning, then the run stops at 0)
-    names = set(spec.get("declare", {}).get("attributes", [])) | set(spec.get("declare", {}).get("variables", []))
-    for ms in spec.get("modules", []) + [dict(u, type=t) for u in spec.get("updates", []) for t in ("Assign", "ReadWrite")]:
+    names = set(declared.get("attributes") or []) | set(declared.get("variables") or [])
+    for ms in (spec.get("modules") or []) + [dict(u, type=t) for u in (spec.get("updates") or [])
+                                              for t in ("Assign", "ReadWrite")]:
         at, va = used_names(expand(ms), ms.get("type", ""))[:2]
         names |= at | va
     clash = reserved_clashes(names, a)
@@ -641,6 +680,10 @@ def build(a, spec):
         return {"error": "SIMAN reserved words used as attribute/variable names; rename them", "names": clash,
                 "model_changed": False}
     if "base" in spec:
+        if "save_as" in spec and (os.path.abspath(spec["save_as"]).lower()
+                                  == os.path.abspath(spec["base"]).lower()):
+            return {"error": "save_as is the base model itself; give a new path so the base file is never overwritten",
+                    "model_changed": False}
         m = open_model(a, spec["base"])
         if "save_as" in spec:
             os.makedirs(os.path.dirname(os.path.abspath(spec["save_as"])), exist_ok=True)  # a new folder is fine
@@ -656,21 +699,21 @@ def build(a, spec):
     apply_run_setup(m, spec.get("run_setup"), report)
     major = com_major_version(safe(lambda: a.Version))
     existing = modules_by_name(m)
-    for u in spec.get("updates", []):
-        mod = existing.get(u["name"])
+    for u in spec.get("updates") or []:
+        mod = existing.get(u.get("name"))
         if mod is None:
-            report["errors"].append(f"update: no module named {u['name']!r}")
+            report["errors"].append(f"update: no module named {u.get('name')!r}")
             continue
         try:
             items = _expand_for_definition(u, mod.Definition, major)
         except ArenaError as e:
-            report["errors"].append(f"{u['name']}: {e}")
+            report["errors"].append(f"{u.get('name')}: {e}")
             continue
-        apply_data(mod, items, report, u["name"])
+        apply_data(mod, items, report, str(u.get("name")))
     auto = []
     made, n_added = {}, 0
-    found = {"attribute": set(spec.get("declare", {}).get("attributes", [])),
-             "variable": set(spec.get("declare", {}).get("variables", [])), "queue": set(), "resource": set(),
+    found = {"attribute": set(declared.get("attributes") or []),
+             "variable": set(declared.get("variables") or []), "queue": set(), "resource": set(),
              "entity": set()}
 
     def collect(items, t):
@@ -684,22 +727,33 @@ def build(a, spec):
         if box is not None:
             overrides = dict(overrides, origin=band_origin(box, float(overrides.get("dx", LAYOUT["dx"])),
                                                            float(overrides.get("dy", LAYOUT["dy"]))))
-    positions = plan_layout(dict(spec, layout=overrides))  # x/y of every module the spec does not place itself
-    for index, ms in enumerate(spec.get("modules", [])):
-        name = ms.get("data", {}).get("Name")
+    layout_notes = []
+    # x/y of every module the spec does not place itself; the fit inside Arena's view is reported if it kicked in
+    positions = plan_layout(dict(spec, layout=overrides), layout_notes)
+    for index, ms in enumerate(spec.get("modules") or []):
+        name = (ms.get("data") or {}).get("Name")
         if name and name in existing:
             report["errors"].append(f"module {name!r} already exists; use 'updates' to change it")
             continue
         try:
             panel = a.Panels.Attach(ms.get("panel", "BasicProcess"))
-            d = mdef(panel, ms["type"])
+            module_type = ms.get("type")
+            if not module_type:
+                raise ArenaError("a module needs 'type' (list_module_types shows the names)")
+            d = mdef(panel, module_type)
             items = _expand_for_definition(ms, d, major)
         except (pythoncom.com_error, ArenaError) as e:
             report["errors"].append(f"module {name or ms.get('id')}: {e}")
             continue
         n_before = m.Modules.Count
         px, py = positions.get(module_key(ms, index), (1000 + 1600 * (n_added % 12), 1000 + 1600 * (n_added // 12)))
-        mod = m.Modules.Create(panel, d, ms.get("x", px), ms.get("y", py))
+        try:  # Arena's coordinates are whole model units; a null x/y means "place it from the graph"
+            cx = int(round(float(ms.get("x") if ms.get("x") is not None else px)))
+            cy = int(round(float(ms.get("y") if ms.get("y") is not None else py)))
+        except (TypeError, ValueError):
+            report["errors"].append(f"module {name or ms.get('id')}: x and y must be numbers")
+            continue
+        mod = m.Modules.Create(panel, d, cx, cy)
         own = safe(lambda: mod.shape.SerialNumber)
         sides = []
         for j in range(n_before + 1, m.Modules.Count + 1):  # data modules Arena adds by itself (Entity, File, Queue ...)
@@ -709,7 +763,7 @@ def build(a, spec):
             if safe(lambda: side.Definition.DataModule, False):
                 sides.append(side)
         apply_data(mod, items, report, name or ms.get("id"))
-        etype = dict(items).get("Entity Type") if ms["type"] == "Create" else None
+        etype = dict(items).get("Entity Type") if module_type == "Create" else None
         for side in sides:
             # a Create adds "Entity 1"; when the spec names its own entity type, rename that one instead of leaving
             # an unused entity type that shows up in every report
@@ -731,35 +785,34 @@ def build(a, spec):
         n_added += 1
         if name:
             existing[name] = mod
-        collect(items, ms["type"])
-    for u in spec.get("updates", []):
-        collect(expand(u), kind(existing[u["name"]]) if u["name"] in existing else "")
-    start = list(spec.get("declare_at") or [0, -4000])[:2]
-    if len(start) < 2:
-        start = [0, -4000]
-    cursor = [start[0], start[1], 0]  # placement cursor [x0, y0, count] for the auto-declared data modules
+        collect(items, module_type)
+    for u in spec.get("updates") or []:
+        collect(expand(u), kind(existing[u.get("name")]) if u.get("name") in existing else "")
+    x0, y0 = declare_origin(spec.get("declare_at"))
+    cursor = [x0, y0, 0]  # placement cursor [x0, y0, count] for the auto-declared data modules
     for what in DECLARERS:
         declare(a, m, existing, found[what], what, cursor, report)
     for k, mod in existing.items():  # connections may name existing modules too
         made.setdefault(k, mod)
-    for c in spec.get("connections", []):
-        if c["from"] not in made or c["to"] not in made:
-            report["errors"].append(f"connect: unknown module {c['from']!r} or {c['to']!r}")
+    for c in spec.get("connections") or []:
+        if c.get("from") not in made or c.get("to") not in made:
+            report["errors"].append(f"connect: unknown module {c.get('from')!r} or {c.get('to')!r}")
             continue
         connect(m, made, c, report)
-    for sh in spec.get("shapes", []):  # drawing only: titles over groups of modules
+    for sh in spec.get("shapes") or []:  # drawing only: titles over groups of modules
         try:
             # "level" keeps one type hierarchy across the drawing: title, section, note (or an explicit height)
             height = sh.get("height") or TEXT_LEVELS.get(sh.get("level", "section"), TEXT_LEVELS["section"])
-            m.Shapes.CreateText(sh["x"], sh["y"], sh["text"], sh.get("font", "Arial"), height,
-                                sh.get("angle", 0), bool(sh.get("bold", True)), bool(sh.get("italic", False)),
-                                bool(sh.get("underline", False)))
-        except (pythoncom.com_error, KeyError) as e:
+            m.Shapes.CreateText(int(round(float(sh["x"]))), int(round(float(sh["y"]))), sh["text"],
+                                sh.get("font", "Arial"), int(round(float(height))),
+                                int(round(float(sh.get("angle", 0)))), bool(sh.get("bold", True)),
+                                bool(sh.get("italic", False)), bool(sh.get("underline", False)))
+        except (pythoncom.com_error, KeyError, TypeError, ValueError) as e:
             report["errors"].append(f"shape {sh}: {e}")
     if spec.get("delete"):
         report["deleted"] = []
         delete_modules(m, spec["delete"], report)
-    report["warnings"].extend(layout_warnings(m))
+    report["warnings"].extend(layout_notes + layout_warnings(m))
     if spec.get("views"):  # named views make each section readable in list_named_views / screenshot_model
         report["views"] = create_views(m, spec["views"], report)
     if spec.get("check", True):  # compile after deletes, so dropped connections and errors show up now, not later
@@ -942,8 +995,9 @@ def check_model(m):
     """Compile the model. Returns errors, plus any connections Check() deleted (it silently drops connections made to
     an invalid entry point)."""
     m.Activate()
-    p = os.path.splitext(m.FullName)[0] + ".err"
-    before = os.path.getmtime(p) if os.path.exists(p) else 0
+    path = safe(lambda: m.FullName) or ""  # an unsaved model has no report file beside it
+    p = os.path.splitext(path)[0] + ".err" if path else ""
+    before = os.path.getmtime(p) if p and os.path.exists(p) else 0
     conns = connection_list(m)
     settings = {"QuietMode": True}
     if com_major_version(safe(lambda: m.Application.Version)) == ARENA_14:
@@ -951,7 +1005,7 @@ def check_model(m):
     with temporary_settings(m, **settings):
         m.Check()
     after = connection_list(m)
-    fresh = os.path.exists(p) and os.path.getmtime(p) > before
+    fresh = bool(p) and os.path.exists(p) and os.path.getmtime(p) > before
     errs = read_err(m) if fresh else []
     dropped = [f"{s} -> {d}" for s, d in conns if (s, d) not in after]
     return errs, dropped

@@ -580,7 +580,7 @@ report's printed precision.
 
 ## Session 2026-11-04: 导图区域、关闭与错误信息
 
-### 54. 导图缺省区域漏掉标题
+### 59. 导图缺省区域漏掉标题
 
 - **Finding:** the default export region came from the flowchart modules only, so a section title (`shapes`) placed
   above the first row was cut out of the PNG; a model that only declares names could not be exported at all.
@@ -588,13 +588,54 @@ report's printed precision.
   shape far away stays out), falls back to the data modules when there are no flowchart modules, and only reports
   "no flowchart modules" when the model draws nothing.
 
-### 55. 读回与关闭的边界情形
+### 60. 读回与关闭的边界情形
 
 - **Change:** `Model.Close()` no longer reports a failure when the model has no `QuietMode` property; `delete`
   activates the model before it uses `ActiveView.Selection`; `run` reads the `.err`, report and license paths from a
   saved path only, so an unsaved model no longer produces `.err` beside the working directory; `results.read` treats
   a report Arena still holds as "try the next candidate" instead of an exception; `arena-agent` answers a missing
   `Operand=Value` or a malformed `--set Module:Operand=Value` with JSON and exit code 2.
+
+## Session 2026-11-05: 视图范围、坐标类型与文档编号
+
+### 61. 自动排布会跑出 Arena 的视图
+- **Finding (code):** `plan_layout` stacked bands downward with the requested `dy` and never checked Arena's view.
+  A model with many ranks, or one column with many branches, produced coordinates past ±32,000 — where the GUI
+  cannot scroll, so those modules are invisible no matter how good the PNG looks. Branch centring produced
+  half-unit y values, and a float `x`/`y` from the spec reached `Modules.Create` as a float, while Arena's COM
+  methods take whole model units.
+- **Change:** `fit_to_view` moves and compresses the layout into the view and `build` reports it in `warnings`;
+  every coordinate handed to COM (module, named view, text shape, `declare_at`) is rounded to whole units.
+
+### 62. 时刻 0 的动画断点
+- **Finding:** `capture_animation_frame` needs a positive time (Arena cannot break at time 0), but the README
+  example started the series at 0, so the documented command failed on its first frame. The series also stopped with
+  "end the active Arena run" on its second frame whenever `End()` left the model in run mode.
+- **Change:** every frame ends a stale run first (`ended_first` in the result); the times must be positive, with an
+  error that says why; `prefix` must be a plain file name instead of a path fragment.
+
+### 63. 暂停帧的比例没有报回来
+- **Change:** `_capture_run_frame` returns the scale the crop really has, so `pixels_per_unit` in the result tells a
+  caller whether a paused frame is sharp or a downscaled screen crop.
+
+### 64. 规格里的 null 和错键
+- **Finding (code):** `{"data": null}` or `"declare": null` raised AttributeError; a module without `type` and a
+  connection without `from`/`to` raised KeyError instead of an error message; and `save_as` equal to `base`
+  overwrote the base model that the spec promises never to touch.
+- **Change:** `expand`, `build` and `connect` read optional fields through `or`/`.get`, a missing `type` or
+  connection endpoint is reported as an error, and a `save_as` that is the base file is refused.
+
+### 65. 文本报表的区段名和空统计
+- **Finding (code):** in the "Output Summary" table the all-letters header row `Identifier Average Half-width ...`
+  was taken for a section header, so those statistics carried a garbage `section`; `drop_empty` indexed `kind`/`n`
+  and raised KeyError on text-report records, which carry `section` instead; `read_db` compared a missing run date
+  with `max()`.
+- **Change:** the header row is skipped, `drop_empty` reads both shapes of record, and the latest-run choice ignores
+  missing dates.
+
+### 66. 文档编号重复
+- **Finding (docs):** the 2026-11-04 session numbered its two entries 54 and 55, which already existed above.
+- **Change:** renumbered to 59 and 60; this session continues from 61.
 
 ## Open items (to try next)
 

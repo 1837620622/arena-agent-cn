@@ -86,6 +86,34 @@ def test_declared_data_modules_are_spread_out():
     assert points[6][1] < points[0][1]  # then a second row below it
 
 
+def test_plan_layout_keeps_a_large_model_inside_the_arena_view():
+    chain = {"modules": [{"id": f"m{i}"} for i in range(200)],
+             "connections": [{"from": f"m{i}", "to": f"m{i + 1}"} for i in range(199)]}
+    notes = []
+    pos = core.plan_layout(chain, notes)
+    assert len(pos) == 200
+    assert all(abs(x) <= 32000 and abs(y) <= 32000 for x, y in pos.values())  # the GUI could not show it otherwise
+    assert notes and "compressed" in notes[0]  # and the build result says so
+
+
+def test_plan_layout_returns_whole_model_units():
+    spec = {"modules": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+            "connections": [{"from": "a", "to": "b"}, {"from": "a", "to": "c"}],
+            "layout": {"dy": 1755}}  # an odd step used to leave half units for the second branch
+    assert all(isinstance(v, int) for point in core.plan_layout(spec).values() for v in point)
+
+
+def test_declare_origin_takes_numbers_and_falls_back():
+    assert core.declare_origin([100, -200]) == [100, -200]
+    assert core.declare_origin(["100", "-200.4"]) == [100, -200]
+    assert core.declare_origin(None) == [0, -4000]
+    assert core.declare_origin(["x", "y"]) == [0, -4000]  # a text value would reach COM as the wrong type
+
+
+def test_expand_tolerates_null_repeat_groups():
+    assert core.expand({"data": None, "rows": None, "cases": None, "resources": None}) == []
+
+
 def test_screenshot_defaults_to_the_native_screen_scale():
     pytest.importorskip("win32gui")
     from arena_agent import snapshot
@@ -208,6 +236,15 @@ def test_parse_out_summary():
     assert res["Doctor.ScheduledUtilization"]["average"] == pytest.approx(0.79324)
     assert res["Patient.NumberOut"]["half_width"] == pytest.approx(6.6629)
     assert res["Patient.NumberOut"]["reps"] == 10
+
+
+def test_parse_out_summary_section_names():
+    # an all-letters header row used to become the section name of every row below it
+    txt = ("Output Summary for 2 Replications\n\nTALLY VARIABLES\n\n"
+           "IDENTIFIER                        AVERAGE    HALF WIDTH   MINIMUM   MAXIMUM\n"
+           "Wait                              5.0000     1.0000       3.0000    7.0000      2\n")
+    row = results.parse_out(txt)["Wait"]
+    assert row["section"] == "Tally Variables" and row["average"] == pytest.approx(5.0)
 
 
 def test_parse_out_single_replication():
@@ -341,6 +378,21 @@ def test_drop_empty():
     res = results.read_db(os.path.join(DATA, "clinic.db"))
     kept = results.drop_empty(res)
     assert all(v["n"] > 0 for v in kept.values())
+    # records from the text report carry a section, not a kind: they must not raise KeyError
+    text = {"Wait": {"section": "Tally Variables", "average": 5.0, "n": 2}}
+    assert results.drop_empty(text) == text
+
+
+def test_animation_frames_validate_before_touching_arena():
+    pytest.importorskip("win32gui")
+    from arena_agent import snapshot
+
+    with pytest.raises(core.ArenaError, match="greater than zero"):
+        snapshot.capture_animation_frames(None, "m.doe", "frames", "ANIMATION", [0, 20])
+    with pytest.raises(core.ArenaError, match="prefix"):
+        snapshot.capture_animation_frames(None, "m.doe", "frames", "ANIMATION", [5], prefix="a/b")
+    with pytest.raises(core.ArenaError, match="distinct"):
+        snapshot.capture_animation_frames(None, "m.doe", "frames", "ANIMATION", [5, 5])
 
 
 def test_summarize_and_t():
