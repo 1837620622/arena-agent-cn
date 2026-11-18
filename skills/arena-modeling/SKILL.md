@@ -41,6 +41,11 @@ command prints JSON.
 5. **Fix until clean.** `build_model` compiles at the end. Every `check_errors` entry names the module at fault; also
    act on `errors` (operands Arena rejected, invalid choices), `warnings` and `dropped_connections`. Re-run
    `check_model` after fixes. The common traps are in `arena_guide("gotchas")`; read it before your first model.
+   Plan the reading order before placing modules. Give the main flow a consistent left-to-right grid and put alternate
+   branches on separate rows. Use explicit `x`, `y` in the spec for the final layout. Fix any `layout:` overlaps reported
+   by the build, then inspect the diagram at a readable scale for clipped text, lines through labels and crossing routes.
+   For a large model, use separate named views for subsystem logic and animation. Recheck the connections and rerun
+   the same inputs after layout changes.
 6. **Verify.** Run a few replications and sanity-check against theory or hand calculations: utilization ~ arrival
    rate x service time / servers; flow conservation (in = out + still inside); for simple queues compare with M/M/c
    formulas. Look at the flowchart with `screenshot_model` when layout or connections are in doubt.

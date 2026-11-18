@@ -95,7 +95,9 @@ traps (hidden entry points, names that are never declared, reserved words that s
 so far are handled by the tool and written up in
 [`skills/arena-modeling/references/discoveries.md`](skills/arena-modeling/references/discoveries.md).
 
-Tested with Arena 16.20 (version 1620). Other versions should work; please open an issue with `arena-agent doctor`
+Tested with Arena 16.20 (version 1620) and Arena 14.0 Professional (version 1400). The Arena 14 batch workflow uses
+SIMAN's `.out` reports. See [Arena 14 troubleshooting](skills/arena-modeling/references/gotchas.md#arena-14).
+For other versions, please open an issue with `arena-agent doctor`
 output if yours does not.
 
 ## Contributing

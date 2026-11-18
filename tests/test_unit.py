@@ -53,6 +53,26 @@ def test_parse_out_single_replication():
     assert res["Patient.NumberIn"]["value"] == pytest.approx(82)
 
 
+def test_text_fallback_uses_each_printed_replication(tmp_path):
+    txt = open(os.path.join(DATA, "clinic.out"), errors="replace").read()
+    out = tmp_path / "clinic.out"
+    out.write_text(txt)
+    stats = results.read(str(out.with_suffix(".doe")), per_replication=True)["statistics"]
+    wait = stats["Examination.Queue.WaitingTime"]
+    assert wait["n"] == 10
+    assert wait["replications"][:3] == [5.9228, 32.970, 5.2357]
+    assert stats["Doctor.ScheduledUtilization"]["average"] == pytest.approx(0.79324)
+    assert len(stats["Doctor.ScheduledUtilization"]["replications"]) == 10
+
+
+def test_text_report_accepts_lowercase_exponent_and_correlation_flag():
+    txt = "TALLY VARIABLES\nIdentifier  Average  Half Width  Minimum  Maximum\nWait  -1.2e-03  (Corr)  -.02  +.1\n"
+    row = results.parse_out(txt)["Wait"]
+    assert row["average"] == pytest.approx(-0.0012)
+    assert row["half_width"] == "(Corr)"
+    assert row["maximum"] == pytest.approx(0.1)
+
+
 def test_read_db_matches_out_summary():
     res = results.read_db(os.path.join(DATA, "clinic.db"))
     out = results.parse_out(open(os.path.join(DATA, "clinic.out"), errors="replace").read())

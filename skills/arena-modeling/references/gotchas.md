@@ -1,6 +1,6 @@
 # Gotchas: Arena through COM
 
-All verified on Arena 16.20. Most are handled by arena-agent already; they are listed so you recognise the symptoms.
+The original findings were verified on Arena 16.20. The Arena 14 checks below are specific to version 1400.
 Background and evidence for each: `arena_guide("discoveries")`.
 
 ## Building
@@ -57,3 +57,18 @@ Background and evidence for each: `arena_guide("discoveries")`.
 20. **Screenshots read the screen.** Anything covering Arena's window spoils `screenshot_model`.
 21. Arena's report database is `<model>.db` (SQLite in Arena 16+), the text report `<model>.out`, errors `<model>.err`
     (binary; arena-agent decodes it and maps each record to its module).
+
+## Arena 14
+
+- A fresh COM launch can fail during Check with `FOPEN`, `SIM.out` and `Permission denied`. The agent starts Arena 14
+  in a writable working directory. If an existing instance was started in a protected directory, close it normally
+  after saving your work, then let the agent start Arena again.
+- `Not a valid password.` and DAO/Jet initialization dialogs can occur during Check or Run on an ordinary, unprotected
+  model. This path uses the legacy Access report database. For Arena 14 checks and batch runs, the agent temporarily
+  sets `DisableReportDatabase` and reads the native `.out`. It restores the model setting afterward. A password prompt
+  while opening a protected model or activating Arena still requires the proper model credentials or license.
+- `.out` uses the native text identifiers, e.g. `Queue1.WaitingTime`. Arena 16+ SQLite reports can use spacing such as
+  `Queue1.Waiting Time`. Text results use the printed precision of the report for per-replication analysis.
+- Arena 14 can reopen a saved model at a different zoom. Save named views for each section and select the intended view
+  before capturing. At full scale, check the first and last modules, branch captions, and a running state with populated
+  queue counts. Keep status numbers away from route lines and verify a multi-digit value before exporting.

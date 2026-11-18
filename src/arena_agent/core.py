@@ -4,13 +4,19 @@ Every public function takes the Arena application object first and returns a JSO
 prints: the CLI prints the result, the MCP server returns it.
 """
 import json
+from contextlib import contextmanager
+from itertools import combinations
 import os
 import re
+import subprocess
+import tempfile
 import time
 import winreg
 
 import pythoncom
 import win32com.client as wc
+import win32api
+import winerror
 
 from . import edition
 from . import results as resultsmod
@@ -56,16 +62,36 @@ class ArenaError(Exception):
     pass
 
 
+@contextmanager
+def temporary_settings(model, **settings):
+    previous = {key: getattr(model, key) for key in settings}
+    try:
+        for key, value in settings.items():
+            setattr(model, key, value)
+        yield
+    finally:
+        for key, value in previous.items():
+            setattr(model, key, value)
+
+
 def arena_dir():
     """Arena's install folder: ARENA_DIR if set, else the folder of the registered COM server (Arena.exe)."""
     if os.environ.get("ARENA_DIR"):
         return os.environ["ARENA_DIR"]
-    try:
-        clsid = winreg.QueryValue(winreg.HKEY_CLASSES_ROOT, CLSID_KEY)
-        exe = winreg.QueryValue(winreg.HKEY_CLASSES_ROOT, rf"CLSID\{clsid}\LocalServer32")
-        return os.path.dirname(exe.strip().strip('"').split('"')[0])
-    except OSError:
-        return None
+    # Arena 14 registers a 32-bit COM server. Python may be using the other registry view.
+    for view in (0, winreg.KEY_WOW64_32KEY, winreg.KEY_WOW64_64KEY):
+        try:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, CLSID_KEY, 0, winreg.KEY_READ | view) as key:
+                clsid = winreg.QueryValue(key, None)
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, rf"CLSID\{clsid}\LocalServer32", 0,
+                                winreg.KEY_READ | view) as key:
+                command = winreg.QueryValue(key, None)
+        except OSError:
+            continue
+        match = re.match(r'\s*(?:"([^"]+)"|(.+?\.exe)(?=\s|$))', command, flags=re.I)
+        if match:
+            return os.path.dirname(os.path.expandvars(match[1] or match[2]))
+    return None
 
 
 _reserved = None
@@ -92,9 +118,39 @@ def reserved_clashes(names):
 
 
 def app(visible=True):
-    a = wc.Dispatch("Arena.Application")  # attaches to running Arena or launches it
+    try:
+        a = wc.GetActiveObject("Arena.Application")
+    except pythoncom.com_error as exc:
+        if exc.hresult != winerror.MK_E_UNAVAILABLE:
+            raise
+        directory = arena_dir()
+        exe = os.path.join(directory, "Arena.exe") if directory else None
+        version = safe(lambda: win32api.GetFileVersionInfo(exe, "\\")["FileVersionMS"] >> 16)
+        a = _launch_arena14(exe) if version == 14 else wc.Dispatch("Arena.Application")
     a.Visible = visible
     return a
+
+
+def _launch_arena14(exe):
+    # Arena 14 opens SIM.out relative to the process working directory, including during Check.
+    # COM activation can put it in Program Files or System32. Start in a writable folder instead.
+    work = os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(), "arena-agent", "work")
+    os.makedirs(work, exist_ok=True)
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = subprocess.SW_HIDE
+    process = subprocess.Popen([exe], cwd=work, startupinfo=startup)
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        try:
+            return wc.GetActiveObject("Arena.Application")
+        except pythoncom.com_error as exc:
+            if exc.hresult != winerror.MK_E_UNAVAILABLE:
+                raise
+        pythoncom.PumpWaitingMessages()
+        time.sleep(0.2)
+    raise ArenaError(f"Arena 14 did not register its COM object (launcher status: {process.poll()}). "
+                     "Open Arena manually and check its startup dialog.")
 
 
 def safe(f, default=None):
@@ -146,14 +202,19 @@ def kind(mod):
     return safe(lambda: mod.Definition.Name, "")
 
 
-def expand(ms):
+def expand(ms, *, flat_record=False):
     """A module spec's data as an ordered list of (operand, value). "rows" lists repeat-group rows in order:
     {"rows": [{"Type": "Attribute", "AName": "x", "Value": "1"}, ...]} -> Type(1), AName(1), Value(1), Type(2) ...
     "cases" does the same for N-way Decide conditions (N If, N Value), "resources" for Process resources."""
     items = list(ms.get("data", {}).items())
     for key in ("rows", "cases", "resources"):
         for i, row in enumerate(ms.get(key, []), 1):
-            items += [(f"{k}({i})", v) for k, v in row.items()]
+            if key == "rows" and flat_record:
+                if i > 1:
+                    raise ArenaError("Arena 14 Record takes one row. Use a separate Record module for each statistic.")
+                items.extend(row.items())
+            else:
+                items.extend((f"{k}({i})", v) for k, v in row.items())
     return [(k, str(v)) for k, v in items]
 
 
@@ -397,15 +458,22 @@ def build(a, spec):
             return {"error": "a new model needs save_as (where to save the .doe)", "model_changed": False}
         m = a.Models.Add()
         m.SaveAs(os.path.abspath(spec["save_as"]))
+    m.Activate()
     safe(lambda: setattr(m.ActiveView, "AutoConnect", False))
     apply_run_setup(m, spec.get("run_setup"), report)
+    legacy = safe(lambda: int(a.Version)) == 1400
     existing = modules_by_name(m)
     for u in spec.get("updates", []):
         mod = existing.get(u["name"])
         if mod is None:
             report["errors"].append(f"update: no module named {u['name']!r}")
             continue
-        apply_data(mod, expand(u), report, u["name"])
+        try:
+            items = expand(u, flat_record=legacy and kind(mod) == "Record")
+        except ArenaError as e:
+            report["errors"].append(f"{u['name']}: {e}")
+            continue
+        apply_data(mod, items, report, u["name"])
     auto = []
     made, n_added = {}, 0
     found = {"attribute": set(spec.get("declare", {}).get("attributes", [])),
@@ -424,11 +492,13 @@ def build(a, spec):
         try:
             panel = a.Panels.Attach(ms.get("panel", "BasicProcess"))
             d = mdef(panel, ms["type"])
+            items = expand(ms, flat_record=legacy and ms["type"] == "Record")
         except (pythoncom.com_error, ArenaError) as e:
             report["errors"].append(f"module {name or ms.get('id')}: {e}")
             continue
         n_before = m.Modules.Count
-        mod = m.Modules.Create(panel, d, ms.get("x", 1000), ms.get("y", 1000))
+        mod = m.Modules.Create(panel, d, ms.get("x", 1000 + 1600 * (n_added % 12)),
+                               ms.get("y", 1000 + 1600 * (n_added // 12)))
         own = safe(lambda: mod.shape.SerialNumber)
         sides = []
         for j in range(n_before + 1, m.Modules.Count + 1):  # data modules Arena adds by itself (Entity, File, Queue ...)
@@ -437,7 +507,6 @@ def build(a, spec):
                 continue
             if safe(lambda: side.Definition.DataModule, False):
                 sides.append(side)
-        items = expand(ms)
         apply_data(mod, items, report, name or ms.get("id"))
         etype = dict(items).get("Entity Type") if ms["type"] == "Create" else None
         for side in sides:
@@ -483,6 +552,7 @@ def build(a, spec):
     if spec.get("delete"):
         report["deleted"] = []
         delete_modules(m, spec["delete"], report)
+    report["warnings"].extend(layout_warnings(m))
     if spec.get("check", True):  # compile after deletes, so dropped connections and errors show up now, not later
         report["check_errors"], report["dropped_connections"] = check_model(m)
         report["ok"] = not report["errors"] and not report["dropped_connections"] and not any(
@@ -525,6 +595,7 @@ def close(a, models=None):
         if not want or m.FullName.lower() in want:
             name = m.FullName
             try:
+                m.QuietMode = True
                 m.Close()
                 closed.append(name)
             except pythoncom.com_error as e:
@@ -571,7 +642,7 @@ def read_err(m):
     """Arena writes check/run errors to <model>.err as binary records: a 4-byte shape serial number 20 bytes before
     the source tag (MODVAL, ...), then the message. Returns [{"module", "type", "message"}]."""
     p = os.path.splitext(m.FullName)[0] + ".err"
-    if not os.path.exists(p):
+    if not os.path.exists(p) or not os.path.getsize(p):
         return []
     return parse_err(open(p, "rb").read(), module_serials(m))
 
@@ -626,14 +697,36 @@ def connection_list(m):
     return res
 
 
+def layout_warnings(model):
+    """Read real module bounds so collisions are reported without moving explicitly placed objects."""
+    bounds = []
+    for i in range(1, model.Modules.Count + 1):
+        module = model.Modules.Item(i)
+        if safe(lambda: module.Definition.DataModule, True):
+            continue
+        shape = module.shape
+        x0, x1 = sorted((shape.Left, shape.Right))
+        y0, y1 = sorted((shape.Top, shape.Bottom))
+        bounds.append((getdata(module, "Name"), x0, y0, x1, y1))
+    warnings = [f"layout: {name!r} is outside the recommended canvas range (-32000 to 32000)"
+                for name, *box in bounds if any(abs(value) > 32000 for value in box)]
+    warnings.extend(f"layout: {a[0]!r} overlaps {b[0]!r}" for a, b in combinations(bounds, 2)
+                    if min(a[3], b[3]) > max(a[1], b[1]) and min(a[4], b[4]) > max(a[2], b[2]))
+    return warnings
+
+
 def check_model(m):
     """Compile the model. Returns errors, plus any connections Check() deleted (it silently drops connections made to
     an invalid entry point)."""
-    m.QuietMode = True
+    m.Activate()
     p = os.path.splitext(m.FullName)[0] + ".err"
     before = os.path.getmtime(p) if os.path.exists(p) else 0
     conns = connection_list(m)
-    m.Check()
+    settings = {"QuietMode": True}
+    if safe(lambda: int(m.Application.Version)) == 1400:
+        settings["DisableReportDatabase"] = True
+    with temporary_settings(m, **settings):
+        m.Check()
     after = connection_list(m)
     fresh = os.path.exists(p) and os.path.getmtime(p) > before
     errs = read_err(m) if fresh else []
@@ -645,7 +738,7 @@ def check(a, model):
     m = open_model(a, model)
     errs, dropped = check_model(m)
     res = {"model": m.FullName, "ok": not dropped and not any(e.get("level") != "warning" for e in errs),
-           "errors": errs, "dropped_connections": dropped}
+           "errors": errs, "dropped_connections": dropped, "layout_warnings": layout_warnings(m)}
     if safe(lambda: m.AreDemoLimitsExceeded):
         res["edition_limit_exceeded"] = True
         res["ok"] = False
@@ -683,21 +776,48 @@ def end_other_runs(a):
 
 
 def _run_once(a, m, show, outputs, per_replication=False):
-    m.QuietMode = True
     ended_first = end_other_runs(a)
+    m.Activate()
+    if safe(lambda: int(a.Version)) != 1400:
+        return _run_batch(m, ended_first, show, outputs, per_replication)
+
+    # Arena 14 can open a modal DAO/Jet error during COM startup. A batch run only needs SIMAN's text report.
+    with temporary_settings(m, DisableReportDatabase=True, DisplayDefaultReport=1, BatchMode=True, QuietMode=True):
+        try:
+            return _run_batch(m, ended_first, show, outputs, per_replication, legacy=True)
+        finally:
+            if safe(lambda: m.State, 0):
+                safe(lambda: m.End())
+
+
+def _run_batch(m, ended_first, show, outputs, per_replication, legacy=False):
+    m.QuietMode = True
     m.BatchMode = True
     t0 = time.time()
-    m.Go(1)  # smGoWait: returns when the run ends
+    if legacy:
+        m.Go(2)  # smGoReturn keeps the COM apartment responsive on Arena 14.
+        start_deadline = time.monotonic() + 15
+        state = m.State
+        while state not in (7, 8, 9, 10, 12, 16, 17, 18, 19, 20, 21):
+            if state == 0 and time.monotonic() >= start_deadline:
+                break
+            pythoncom.PumpWaitingMessages()
+            time.sleep(0.05)
+            state = m.State
+    else:
+        m.Go(1)  # smGoWait: returns when the run ends
     res = {"seconds": round(time.time() - t0, 1), "end_time": safe(lambda: m.SIMAN.RunCurrentTime),
            "replications": safe(lambda: int(m.NumberOfReplications)), "errors": []}
     if ended_first:
         res["ended_first"] = ended_first
     if res["end_time"] is None:
         res["errors"].append({"level": "error", "message": "the run did not start (no SIMAN run state after Go)"})
+    elif legacy and state != 12:  # smStateRunComplete
+        res["errors"].append({"level": "error", "message": f"Arena 14 run stopped before completion (State {state})"})
     p = os.path.splitext(m.FullName)[0] + ".err"
     fresh = lambda: os.path.exists(p) and os.path.getmtime(p) > t0  # noqa: E731
     if fresh():
-        res["errors"] = read_err(m)
+        res["errors"].extend(read_err(m))
     if show:  # read before End(), which resets the run; a bad expression writes its own record to .err
         n_before = len(res["errors"])
         res["values"] = {e: evaluate(m, e) for e in show}
@@ -716,6 +836,8 @@ def _run_once(a, m, show, outputs, per_replication=False):
         res["statistics"] = r["statistics"]
         if r.get("note"):
             res["results_note"] = r["note"]
+        if legacy and r["source"] is None and not res["errors"]:
+            res["errors"].append({"level": "error", "message": "Arena 14 did not write a fresh SIMAN text report"})
     lic = resultsmod.report_license(m.FullName)
     if lic:  # the text report names the license ("STUDENT"); remember it, it tells Student from lab licenses apart
         res["report_license"] = lic
