@@ -1,119 +1,81 @@
-# arena-agent
+# Arena Agent 中文版
 
-Let an AI agent (Claude, Codex, or any MCP client) build, run and analyse **Rockwell Arena** simulation models for
-you. Describe the problem in plain words; the agent turns it into an Arena model, compiles it, fixes its own errors,
-runs replications and reports the results with confidence intervals. Then ask "what if we add a fourth doctor?" and it
-changes the model and runs it again.
+在 Windows 上通过 MCP 或命令行操作 Rockwell Arena。可以把流程规格生成可编辑的 `.doe`，原生检查和批跑仿真，读回逐次重复结果，并按命名视图导出流程图。
 
-> "Patients arrive at a clinic every 5 minutes on average. Three doctors each take about 12 minutes per patient.
-> How long do patients wait, and would a fourth doctor be worth it?"
+## Arena 版本
 
-The agent builds `clinic.doe` (Create -> Process with 3 doctors -> Dispose), runs it, and answers with average waits,
-utilization and their 95% half-widths for 3 and 4 doctors. The `.doe` file opens in Arena like any model you built
-by hand.
+| 版本 | 运行方式 | 验证范围 |
+| --- | --- | --- |
+| Arena 14.x | 自动识别 COM 主版本。从可写目录冷启动，批跑使用原生 SIMAN `.out`，完成后恢复模型的旧报表设置 | Arena 14.0 Professional 原生验证冷启动、MCP 重连、建模、仿真与导图 |
+| Arena 16.x | 自动识别 Arena 16，沿用标准 COM 批跑，优先读 SQLite `.db`，可回退到原生 `.out` | 16.20 来自上游运行记录。本仓库测试覆盖版本分流和 SQLite 报表样本。新版功能的本机原生验证使用 Arena 14.0 |
 
-## Install (one command)
+运行 `arena-agent info` 或 MCP 的 `arena_status`，可查看已连接的 Arena 版本、版本模式和安装目录。模型的 `Record` 行由当前模板的实际字段决定。
 
-You need Windows and Arena (any edition: Student, Academic, Standard, Professional). In **PowerShell**:
+## 安装和更新
 
-```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/MusaibBashir/arena-agent/main/install.ps1 | iex"
-```
-
-Or with curl, from **Command Prompt**:
-
-```bat
-curl -fsSL https://raw.githubusercontent.com/MusaibBashir/arena-agent/main/install.ps1 -o "%TEMP%\arena-agent-install.ps1" && powershell -ExecutionPolicy Bypass -File "%TEMP%\arena-agent-install.ps1"
-```
-
-(In PowerShell, type `curl.exe`, not `curl`: there `curl` is a different built-in command.)
-
-That's all. It installs everything it needs in its own folder (no Python or git required; an existing Python is not
-touched), connects arena-agent to **Claude Code, Claude Desktop and Codex** (whichever you have), and checks that
-Arena responds. Start a new Claude or Codex session afterwards. Run the same command again to update.
-
-If something is off, run `arena-agent doctor`: every failed check says how to fix it.
-
-### Other ways
-
-- **Claude Code plugin:** `/plugin marketplace add MusaibBashir/arena-agent`, then `/plugin install arena-agent`
-  (needs [uv](https://docs.astral.sh/uv/) on PATH).
-- **Any other MCP client** (Cursor, Windsurf, ...): install with the command above, then add the server printed by
-  `arena-agent install --print` to the client's MCP settings.
-- **pip / uv:** `uv tool install https://github.com/MusaibBashir/arena-agent/archive/refs/heads/main.zip` then
-  `arena-agent install`.
-
-## What the agent can do
-
-| Tool | What it does |
-|---|---|
-| `arena_status` | Arena version and edition; tells the agent whether model size is limited |
-| `build_model` | create a model, or a new version of an existing one, from a JSON spec; compiles it |
-| `inspect_model` | read any `.doe`: modules, settings, connections |
-| `set_module`, `set_run_setup`, `delete_modules` | change a model |
-| `check_model` | compile; every error names the module that caused it |
-| `run_model` | run replications; every statistic with average, 95% half-width, min, max |
-| `run_scenarios` | compare what-if scenarios without touching the saved model |
-| `get_results` | read the last run's statistics again |
-| `screenshot_model` | a picture of the flowchart |
-| `arena_guide`, `template_reference`, `module_operands` | the modeling guide and Arena's own module reference |
-
-The **arena-modeling skill** (installed alongside) teaches the agent the workflow: ask for missing data, build in
-stages, verify against theory, choose replications and warm-up, compare scenarios properly, and hand back exactly
-what you asked for: numbers, the model file, a written summary, or all three.
-
-## Arena editions
-
-arena-agent reads the license type from Arena. The free **Student** edition limits model size (Rockwell does not
-publish the exact cap; it is commonly reported as 150 entities in the system at once). The agent keeps models small on
-limited editions and tells you plainly if Arena reports a model is over the limit. If arena-agent cannot tell which
-edition you have, the agent asks you once; you can also set it yourself:
+先安装 Rockwell Arena 并确认能正常打开。推荐用 [uv](https://docs.astral.sh/uv/getting-started/installation/) 管理 Python 运行环境。以下命令从本仓库安装，更新时可重跑第一条。
 
 ```powershell
-arena-agent edition limited   # Student / Evaluation
-arena-agent edition full      # commercial or university lab license
+uv tool install --force --python 3.12 https://github.com/1837620622/arena-agent-cn/archive/refs/heads/main.zip
+arena-agent --version
+arena-agent doctor
 ```
 
-## Command line
-
-Everything is also available without an AI client; every command prints JSON:
+连接 Codex 或 Claude Code，选你使用的客户端执行。登记后重新连接 MCP，工具就会出现在新会话中。
 
 ```powershell
-arena-agent build examples\clinic.json
-arena-agent run clinic.doe --reps 20 --measures "Waiting Time" Utilization
-arena-agent run clinic.doe --set Doctor:Capacity=4
-arena-agent inspect clinic.doe
-arena-agent --help
+arena-agent install --client codex
+arena-agent install --client claude-code
 ```
 
-## How it works
+也可以克隆仓库后运行 `install.ps1`，它会安装工具并登记本机支持的客户端。Claude Code 插件入口是 `/plugin marketplace add 1837620622/arena-agent-cn`，添加后运行 `/plugin install arena-agent`。
 
-Arena exposes a COM automation interface (`Arena.Application`). arena-agent drives it from Python (pywin32): it creates
-modules, sets their operands, connects them, compiles, runs in batch mode, decodes Arena's binary error file to find
-the module at fault, and reads results from Arena's report database. Arena's COM interface has many undocumented
-traps (hidden entry points, names that are never declared, reserved words that stop runs at time 0); the ones found
-so far are handled by the tool and written up in
-[`skills/arena-modeling/references/discoveries.md`](skills/arena-modeling/references/discoveries.md).
+### CC Switch 安装技能
 
-Native tests have run on Arena 16.20 (COM 1620) and Arena 14.0 Professional (COM 1400). The agent uses the running
-COM version to select its workflow automatically. Arena 14.x uses SIMAN's `.out` reports for batch runs, and
-`arena_status` shows the active version, install folder, and compatibility mode. Record rows follow the loaded
-template's operand definition. See [Arena 14 troubleshooting](skills/arena-modeling/references/gotchas.md#arena-14).
-If a different release behaves unexpectedly, open an issue with `arena-agent doctor` output.
+在 CC Switch 的 Skills 页面添加仓库 `1837620622/arena-agent-cn`，分支选 `main`。在列表中安装 `arena-modeling`，再选需要同步的客户端。技能位于 [skills/arena-modeling](skills/arena-modeling)。之后可在 CC Switch 检查并应用技能更新。
 
-## Contributing
+CC Switch 的 Skills 功能同步技能文件。Python 后端和 MCP 服务通过本节的安装命令管理。
 
-Found a new Arena quirk? Add it to the discovery log (finding, how found, evidence, change) and open a pull request.
-Development setup:
+## 示例和验收
+
+在新工作目录中运行示例。将下面的 `examples/bank.json` 改为克隆目录下该文件的实际路径。Arena 会在当前目录保存 `bank.doe`。
 
 ```powershell
-git clone https://github.com/MusaibBashir/arena-agent; cd arena-agent
-uv venv --python 3.12; uv pip install -e ".[dev]"
-.venv\Scripts\pytest              # unit tests (no Arena needed)
-.venv\Scripts\pytest -m arena     # end-to-end tests against a local Arena
+arena-agent build "E:\path\to\arena-agent-cn\examples\bank.json"
+arena-agent validate bank.doe --reps 3
+arena-agent results bank.doe --per-rep
 ```
 
-## License
+`validate` 依次调用 Arena 原生 Check 和批跑，报告布局警告、结束时间、重复次数、原生结果来源和统计项数量，并比对验收前后的 DOE 文件哈希。`ok: true` 表示这些检查通过。原生 `.out` 或 `.db` 等运行文件保存在模型旁，需要隔离结果时请先复制模型及其相对路径依赖。
 
-MIT. Arena is a product of Rockwell Automation; this project is not affiliated with or endorsed by Rockwell
-Automation, and it does not include any Arena files. You need your own Arena installation and license.
+导出整图可在验收时加 `--png`。模型已保存命名视图时，可读取视图列表，按实际名称导出分区图。可调 `--ppu` 提高文字和连线分辨率。出图时保持 Arena 窗口可见且无遮挡。
+
+```powershell
+arena-agent validate bank.doe --reps 3 --png bank.png
+arena-agent views existing.doe
+arena-agent screenshot existing.doe upstream.png --view "ARRIVAL_UPSTREAM" --ppu 0.22
+```
+
+| MCP 工具 | 用途 |
+| --- | --- |
+| `arena_status` / `arena_guide` | 查询版本、许可状态或建模参考 |
+| `build_model` / `inspect_model` / `set_module` | 生成和检查可编辑模型，读取模块及连接，修改参数 |
+| `check_model` / `validate_model` | 原生 Check，或一次完成检查、批跑、结果验收和可选 PNG 导出 |
+| `run_model` / `run_scenarios` / `get_results` | 批跑、比较方案和读取结果，支持逐次重复 |
+| `list_named_views` / `screenshot_model` | 列出命名视图，导出整图或指定分区 |
+
+建模参数参考 [JSON 规格](skills/arena-modeling/references/build-spec.md)。大模型先按业务环节划分命名视图，原生检查通过后导出总图和细节图，并以 100% 比例核对字号、模块边缘和分支连线。Arena 14 的报表弹窗、视口拼接和权限排查见 [兼容性说明](skills/arena-modeling/references/gotchas.md)。
+
+## 开发和反馈
+
+```powershell
+uv sync --extra dev
+uv run pytest
+uv run pytest -m arena
+```
+
+第一组测试使用本地测试样本。原生测试需要 Windows、Arena 和有效许可。提交 [问题](https://github.com/1837620622/arena-agent-cn/issues) 时可附 Arena 版本、失败命令、精简模型与 `arena-agent doctor` 的相关输出。
+
+## 来源与许可
+
+基于 [Musaib Bin Bashir 的 arena-agent](https://github.com/MusaibBashir/arena-agent) 开发，保留原作者版权与 [MIT 许可证](LICENSE)。

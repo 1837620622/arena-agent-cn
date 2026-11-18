@@ -177,17 +177,31 @@ def get_results(model: str, per_replication: bool = False, include_empty: bool =
 
 
 @mcp.tool()
+def list_named_views(model: str) -> dict:
+    """Read saved Arena view names and their bounds as [x0, y0, x1, y1] in model units."""
+    return _guard(core.list_named_views, model, retry=True)
+
+
+@mcp.tool()
 def screenshot_model(model: str, out_path: str | None = None, region: list[float] | None = None,
-                     pixels_per_unit: float | None = None) -> Any:
-    """Picture of the model's flowchart (Arena must be visible on screen). Default: the whole flowchart fitted to one
-    screen; region [x0, y0, x1, y1] in model units and pixels_per_unit zoom in. Saves a PNG next to the model unless
-    out_path is given, and returns the image."""
+                     pixels_per_unit: float | None = None, view_name: str | None = None) -> Any:
+    """Export the visible Arena flowchart as a PNG. Choose a saved view by view_name or a rectangle by region
+    [x0, y0, x1, y1]. If both are omitted, fit the whole flowchart. Set pixels_per_unit for a tiled detail export."""
     from .snapshot import snapshot
     out_path = out_path or os.path.splitext(os.path.abspath(model))[0] + "_flowchart.png"
-    res = _guard(snapshot, model, out_path, region, pixels_per_unit)
+    res = _guard(snapshot, model, out_path, region, pixels_per_unit, view_name=view_name)
     if "error" in res:
         return res
     return [json.dumps(res), Image(path=res["out"])]
+
+
+@mcp.tool()
+def validate_model(model: str, replications: int = 1, png_path: str | None = None,
+                   view_name: str | None = None, pixels_per_unit: float | None = None) -> dict:
+    """Check native compilation, layout warnings, batch results, and optionally export a PNG. Verify the DOE file
+    stays unchanged. Arena must be visible for PNG export. Native reports are written next to the model."""
+    from .validation import validate
+    return _guard(validate, model, replications, png_path, view_name, pixels_per_unit)
 
 
 @mcp.tool()

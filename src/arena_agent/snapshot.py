@@ -14,7 +14,7 @@ import win32con
 import win32gui
 from PIL import Image, ImageGrab
 
-from .core import ArenaError, open_model, safe
+from .core import ArenaError, named_view_regions, open_model, safe
 
 
 def _dpi_aware():
@@ -81,11 +81,30 @@ def _zoom_for_tile(view, requested, needed):
     raise ArenaError(f"Arena could not display screenshot tile {needed}; reduce the zoom or select a smaller region")
 
 
-def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64):
-    """Write a PNG of the flowchart. region: [x0, y0, x1, y1] in model units (default: all flowchart modules).
+def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64, *, view_name=None):
+    """Write a PNG of the flowchart by named view or rectangle (default: all flowchart modules).
     ppu: screen pixels per model unit; default fits the region into one screen (readable for small models)."""
+    if view_name is not None and region is not None:
+        raise ArenaError("choose view_name or region")
     _dpi_aware()
     m = open_model(a, model)
+    if view_name is not None:
+        views = named_view_regions(m)
+        if view_name not in views:
+            raise ArenaError(f"unknown named view {view_name!r}; available views: {', '.join(views) or '(none)'}")
+        region = views[view_name]
+    if region is not None:
+        if len(region) != 4 or not all(math.isfinite(float(value)) for value in region):
+            raise ArenaError("screenshot region must contain four finite coordinates")
+        X0, Y0, X1, Y1 = (float(x) for x in region)
+    else:
+        X0, Y0, X1, Y1 = modules_bbox(m)
+        mg = 400
+        X0, Y0, X1, Y1 = X0 - mg, Y0 - mg, X1 + mg, Y1 + mg
+    if not (X0 < X1 and Y0 < Y1):
+        raise ArenaError("screenshot region must have increasing x and y bounds")
+    if ppu is not None and (not math.isfinite(ppu) or ppu <= 0):
+        raise ArenaError("screenshot pixels per unit must be positive and finite")
     a.Visible = True
     m.Activate()
     v = m.ActiveView
@@ -102,18 +121,10 @@ def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64):
     time.sleep(0.8)
     pr = client_rect(pane)
     pw, ph = pr[2] - pr[0], pr[3] - pr[1]
-    if region:
-        X0, Y0, X1, Y1 = (float(x) for x in region)
-    else:
-        X0, Y0, X1, Y1 = modules_bbox(m)
-        mg = 400
-        X0, Y0, X1, Y1 = X0 - mg, Y0 - mg, X1 + mg, Y1 + mg
-    if not (X0 < X1 and Y0 < Y1):
-        raise ArenaError("screenshot region must have increasing x and y bounds")
-    if not ppu:
+    if pw <= 0 or ph <= 0:
+        raise ArenaError("the Arena flowchart pane is not visible")
+    if ppu is None:
         ppu = min(pw / (X1 - X0), ph / (Y1 - Y0)) * 0.9  # one tile
-    if not math.isfinite(ppu) or ppu <= 0:
-        raise ArenaError("screenshot pixels per unit must be positive and finite")
     tw, th = pw / ppu * 0.92, ph / ppu * 0.92  # tile step in world units (8% overlap)
     nx, ny = max(1, math.ceil((X1 - X0) / tw)), max(1, math.ceil((Y1 - Y0) / th))
     if nx * ny > max_tiles:
@@ -140,4 +151,5 @@ def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64):
     out_path = os.path.abspath(out_path)
     canvas.save(out_path)
     return {"out": out_path, "size": [W, H], "tiles": nx * ny, "region": [X0, Y0, X1, Y1],
+            **({"view_name": view_name} if view_name is not None else {}),
             "note": "grabbed from the screen: if it shows another window, bring Arena to the front and retry"}

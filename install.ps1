@@ -1,6 +1,6 @@
 # arena-agent installer for Windows.
 #
-#   powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/MusaibBashir/arena-agent/main/install.ps1 | iex"
+#   powershell -ExecutionPolicy Bypass -File .\install.ps1
 #
 # Installs uv (if missing), then arena-agent with its own private Python (your Python, if any, is not touched),
 # registers the MCP server and the arena-modeling skill with Claude Code, Claude Desktop and Codex (whichever are
@@ -20,7 +20,7 @@ function Say($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 if ($env:OS -ne 'Windows_NT') { throw 'arena-agent needs Windows (Rockwell Arena runs only on Windows).' }
 
 $src = $env:ARENA_AGENT_SOURCE
-if (-not $src) { $src = 'https://github.com/MusaibBashir/arena-agent/archive/refs/heads/main.zip' }
+if (-not $src) { $src = 'https://github.com/1837620622/arena-agent-cn/archive/refs/heads/main.zip' }
 
 # 1. uv: a small tool that installs Python apps in their own environment
 $uv = Get-Command uv -ErrorAction SilentlyContinue

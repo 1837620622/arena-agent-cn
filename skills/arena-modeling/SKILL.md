@@ -1,95 +1,35 @@
 ---
 name: arena-modeling
-description: Build, run, modify and analyse Rockwell Arena discrete-event simulation models (.doe) on Windows through the arena-agent tools (MCP server or CLI). Use when the user wants a problem statement (queues, clinics, banks, factories, call centres, supply chains, ride hailing, any process with arrivals, resources and waiting) modelled or simulated in Arena, an existing Arena model changed, tested or debugged, or Arena results, scenarios or what-if comparisons.
+description: 在 Windows 上使用 Rockwell Arena 14 或 16 构建、修改和验收可编辑的离散事件仿真模型（.doe）。适用于队列、产线、诊所、交通和物流流程，以及原生批跑、方案对比、逐次重复统计、命名视图和 PNG 导图。
 ---
 
-# Arena modeling with arena-agent
+# Arena 离散事件仿真
 
-arena-agent drives Rockwell Arena through its COM automation interface. You build models from a JSON spec, compile
-them, run them in batch mode and read every statistic back with 95% confidence half-widths, without the user dragging
-a single module. Tools come from the `arena-agent` MCP server (`arena_status`, `build_model`, `run_model`, ...). If
-your client has no MCP, use the same operations from a shell: `arena-agent <command>` (`arena-agent --help`); every
-command prints JSON.
+通过 [arena-agent-cn](https://github.com/1837620622/arena-agent-cn) 提供的 MCP 或 `arena-agent` 命令行操作本机 Arena。安装、更新和 CC Switch 同步方式见[仓库说明](https://github.com/1837620622/arena-agent-cn#安装和更新)。
 
-## First, every session
+## 接入与版本
 
-1. `arena_status`. It starts Arena if needed (up to a minute) and reports the active COM version, compatibility mode,
-   and **edition**. Arena 14.x selects the text-report batch workflow automatically.
-   - `edition.status == "unknown"`: ask the user once, "Are you on the free Arena Student edition, or a full / university
-     lab license?", then `set_edition(limited=true|false)`.
-   - `"limited"`: keep models small. Rockwell does not publish the exact cap; the Student edition is commonly reported
-     to stop runs once more than 150 entities are in the system at once. Prefer designs with few entities alive at once
-     (finite runs, no huge initial batches, no entities parked forever). `check_model` / `run_model` report
-     `edition_limit_exceeded` when Arena says the model is over the limit: tell the user plainly and offer a smaller
-     model.
-   - `"view-only"` / `"run-only"`: you cannot build or edit; you can only run existing models.
-2. If `arena_status` fails, run `arena-agent doctor` in a shell and follow its `fix` lines.
+- 先调用 `arena_status`，或执行 `arena-agent info`，查看当前 COM 版本、许可状态和兼容模式。连接失败时运行 `arena-agent doctor`。
+- Arena 14.x 批跑默认读取原生 SIMAN `.out`。Arena 16.x 优先读取 SQLite `.db`。不同版本的模板字段以 `module_operands` 和 `template_reference` 为准。
+- 如果许可状态未知且会影响建模规模，再确认使用的是学生版还是完整许可。遇到 `edition_limit_exceeded` 时准确指出限制并调整模型规模。
 
-## From problem statement to answer
+## 建模与验收
 
-1. **Understand the system.** Identify entities (what flows), arrivals (rate, distribution, schedule), activities
-   (durations, distributions), resources (how many, schedules), routing (probabilities, conditions), queue rules,
-   run length / terminating condition, warm-up, and the **measures** the user cares about (waiting time, utilization,
-   throughput, queue length, cost ...).
-2. **Ask for what is missing, briefly.** If the user does not know a value, propose a standard assumption (e.g.
-   exponential interarrival times, triangular service times) and say it is an assumption. Do not ask about anything
-   you can default sensibly; list your assumptions in the final answer.
-3. **Sketch the flow** in a sentence or two (Create -> Assign -> Decide -> Process ... -> Dispose) and the data
-   modules (Resources, Variables). For a big system, plan stages and build/verify one stage at a time.
-4. **Build** with `build_model` (spec: `arena_guide("build-spec")`, recipes: `arena_guide("modules")`). Put the model
-   where the user wants it; default to their current project folder. Never overwrite the user's model: extend it with
-   `base` + `save_as` (a new version file).
-5. **Fix until clean.** `build_model` compiles at the end. Every `check_errors` entry names the module at fault; also
-   act on `errors` (operands Arena rejected, invalid choices), `warnings` and `dropped_connections`. Re-run
-   `check_model` after fixes. The common traps are in `arena_guide("gotchas")`; read it before your first model.
-   Plan the reading order before placing modules. Give the main flow a consistent left-to-right grid and put alternate
-   branches on separate rows. Use explicit `x`, `y` in the spec for the final layout. Give module labels room inside
-   their own shapes and leave space for branch captions and queue indicators. Fix any `layout:` overlaps reported by
-   the build, then open the exported PNG at 100% and check all labels, arrowheads and route joins. For a large model,
-   save named views for subsystem logic and animation. Export one overview and readable details. Reopen the saved
-   model, recheck the connections and rerun the same inputs after layout changes.
-6. **Verify.** Run a few replications and sanity-check against theory or hand calculations: utilization ~ arrival
-   rate x service time / servers; flow conservation (in = out + still inside); for simple queues compare with M/M/c
-   formulas. Look at the flowchart with `screenshot_model` when layout or connections are in doubt.
-7. **Run for the answer.** Choose replications so the half-widths are small relative to the differences that matter
-   (start with 10-30; more if half-widths are wide). Set run length, warm-up (for steady-state questions) and base time
-   units explicitly in `run_setup`. See `arena_guide("results")`.
-8. **Compare alternatives** with `run_scenarios` (changes applied in memory, nothing saved; same replications for every
-   scenario). Report whether differences are bigger than the half-widths.
-9. **Deliver exactly what was asked**: numbers (with units and 95% half-widths), the `.doe` file path, a written
-   summary (system, assumptions, results, recommendation), or any combination. The `.doe` opens in Arena; results
-   also stay in `<model>.db` / `<model>.out`.
+1. 从题目、已有数据或需求中确认到达、服务、资源、路径、队列、终止条件和评价指标。运行长度、热身时间及时间单位应在 `run_setup` 中明确。可合理设定的缺项应在交付时说明假设。
+2. 已有模型先用 `inspect_model` 看模块、参数和连线。修改另存时用 `build_model` 的 `base` 与 `save_as`。新模型使用 [JSON 建模规格](references/build-spec.md)，字段值按 Arena 原生写法填写，如 `EXPO(5)`、`Minutes`。
+3. 主流程采用统一阅读方向，分支各占一行或独立区域。用显式 `x`、`y` 定位，留足标签、折线和队列计数空间。检查 `check_errors`、`dropped_connections`、`layout_warnings` 和操作中的读回异常。
+4. 用 `validate_model` 对已保存模型执行原生检查和批跑。指定 `png_path` 可以同时出图。验收结果包含模型文件是否变化、仿真结束时间、原生结果来源与统计项数量。需要明细时用 `run_model` 或 `get_results` 的 `per_replication`。验收会在模型旁生成原生报告文件。
+5. 用流量守恒、利用率数量级和定义的约束核对结果。比较方案时固定观察口径、热身和重复次数，再看差值与 95% 置信区间半宽。统计字段和典型用法见 [结果读取](references/results.md)。
+6. 大模型建模逻辑与动画分别保存命名视图。用 `list_named_views` 查看名称，用 `screenshot_model(view_name=...)` 分区导出。缩放至 100% 核对文字、箭头和拼接处。排版调整保存后重开模型、重新 Check 并按原输入复跑。
 
-## Tools at a glance
+## 常用入口
 
-| Tool | Use |
-|---|---|
-| `arena_status`, `set_edition` | Arena version, edition / license limits |
-| `arena_guide(topic)` | this guide and its references: `skill`, `build-spec`, `modules`, `gotchas`, `results`, `discoveries` |
-| `list_panels`, `list_module_types`, `module_operands`, `template_reference` | discover module types and exact operand names |
-| `build_model` | create or extend a model from a spec; compiles |
-| `inspect_model` | read an existing model: modules, operands, connections, run setup |
-| `set_module`, `set_run_setup`, `delete_modules` | small edits (saved) |
-| `check_model` | compile; errors mapped to modules |
-| `run_model` | run; all statistics with half-widths; temporary `changes` / `run_setup` |
-| `run_scenarios` | what-if comparisons in one session |
-| `get_results` | statistics of the last run without re-running |
-| `screenshot_model` | PNG of the flowchart |
-| `close_models` | close before deleting / replacing files |
+| 用途 | MCP | 命令行 |
+| --- | --- | --- |
+| 查看运行环境 | `arena_status` | `arena-agent info` |
+| 建模与检查 | `build_model`、`check_model` | `arena-agent build`、`arena-agent check` |
+| 一次验收 | `validate_model` | `arena-agent validate` |
+| 仿真与结果 | `run_model`、`run_scenarios`、`get_results` | `arena-agent run`、`arena-agent scenarios`、`arena-agent results` |
+| 命名视图和截图 | `list_named_views`、`screenshot_model` | `arena-agent views`、`arena-agent screenshot` |
 
-## Working with an existing model
-
-`inspect_model` first (with `out_path` for big models), then plan changes. Many small edits: one `build_model` with
-`base` = the model (and `save_as` = a new version) and an `updates` list, instead of many `set_module` calls (each one
-opens and saves the model). Before trusting results of a model someone else built, check its data against the problem
-statement: hand-entered tables are often wrong in one cell.
-
-## Rules
-
-- Do not save over a user's model without asking; keep versions (`model_v2.doe`, ...).
-- Values in specs are strings exactly as typed in Arena's dialogs ("EXPO(5)", "Minutes", "Seize Delay Release").
-- Names of attributes and variables must not be SIMAN reserved words (`Wait`, `Group`, `Queue`, `Delay`, `Count`, ...);
-  the tools refuse them, rename (e.g. `RWait`).
-- One Arena runs one model at a time; tool calls are serialised. A run of a large model can take minutes.
-- When something new about Arena's COM behaviour is learned the hard way, tell the user; it may belong in the project's
-  DISCOVERIES.md (https://github.com/MusaibBashir/arena-agent).
+建模时按需读取 [模块用法](references/modules.md)、[兼容性和故障排查](references/gotchas.md) 或[原生行为记录](references/discoveries.md)。导图依赖可见的 Arena 窗口，修改或替换 DOE 前先关闭已打开的相应模型。交付按用户指定的文件类型和范围组织。

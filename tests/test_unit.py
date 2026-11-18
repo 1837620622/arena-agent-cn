@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from arena_agent import cli, core, edition, install, paths, results
+from arena_agent import cli, core, edition, install, paths, results, validation
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
 
@@ -48,17 +48,38 @@ def test_running_arena_selects_its_own_reserved_words(tmp_path, monkeypatch):
     assert core.reserved_clashes(names, SimpleNamespace(FullName=str(newer / "Arena.exe"))) == ["NewerWord"]
 
 
+def test_named_view_bounds_are_ordered_for_export():
+    view = SimpleNamespace(Name="Detail", Left=20, Right=30, Top=100, Bottom=60)
+    model = SimpleNamespace(NamedViews=SimpleNamespace(Count=1, Item=lambda _: view))
+    assert core.named_view_regions(model) == {"Detail": [20, 60, 30, 100]}
+
+
+def test_failed_check_does_not_run_or_export(tmp_path, monkeypatch):
+    path = tmp_path / "invalid.doe"
+    path.write_bytes(b"unchanged")
+    app = SimpleNamespace(Models=SimpleNamespace(Count=0))
+    monkeypatch.setattr(core, "open_model", lambda *_: object())
+    monkeypatch.setattr(core, "info", lambda _: {"version": 1620, "compatibility_mode": "arena16"})
+    monkeypatch.setattr(core, "check", lambda *_: {"ok": False, "errors": ["Invalid operand"]})
+    monkeypatch.setattr(core, "run", lambda *_, **__: pytest.fail("invalid model should not run"))
+    res = validation.validate(app, path, png_path=tmp_path / "invalid.png")
+    assert not res["ok"] and res["model_file_unchanged"]
+    assert res["check"]["errors"] == ["Invalid operand"]
+    assert not (tmp_path / "invalid.png").exists()
+
+
 @pytest.mark.parametrize(("version", "uses_text_reports"), [
     (1400, True), (1470, True), (1500, False), (1620, False), (None, False),
 ])
 def test_active_version_selects_report_settings(version, uses_text_reports, monkeypatch):
-    app = SimpleNamespace(Version=version)
+    app = SimpleNamespace(Version=version, Models=SimpleNamespace(Count=0))
     model = SimpleNamespace(Application=app, FullName="model.doe", QuietMode=False, BatchMode=False,
                             DisableReportDatabase=False, DisplayDefaultReport=0, State=0, Activate=lambda: None)
     checked = []
     model.Check = lambda: checked.append((model.QuietMode, model.DisableReportDatabase))
     monkeypatch.setattr(core, "connection_list", lambda _: [])
     monkeypatch.setattr(core, "end_other_runs", lambda _: [])
+    monkeypatch.setattr(core.edition, "describe", lambda _: {})
 
     def run_batch(model, ended, show, outputs, per_replication, legacy=False):
         assert legacy == uses_text_reports
@@ -67,6 +88,9 @@ def test_active_version_selects_report_settings(version, uses_text_reports, monk
         return "ran"
 
     monkeypatch.setattr(core, "_run_batch", run_batch)
+    assert core.info(app)["compatibility_mode"] == (
+        "arena14" if uses_text_reports else "arena16" if version == 1620 else "default"
+    )
     assert core.check_model(model) == ([], [])
     assert checked == [(True, uses_text_reports)]
     assert core._run_once(app, model, None, True) == "ran"

@@ -10,7 +10,7 @@ there (`build`, `set`, `check`, `run --show`, `--outputs`) map onto today's `are
 names like `stageB.py` or `run_tests.py` were that project's own scripts.
 
 **Contributing:** found something new? Add a dated session at the bottom (Finding · How found · Evidence · Change, or
-*open*), and update the open items. Pull requests welcome at https://github.com/MusaibBashir/arena-agent.
+*open*), and update the open items. Pull requests welcome at https://github.com/1837620622/arena-agent-cn.
 
 ---
 

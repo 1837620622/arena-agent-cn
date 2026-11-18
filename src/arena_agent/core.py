@@ -25,6 +25,7 @@ from . import results as resultsmod
 SEARCH_NAME = 2  # smFindName
 CLSID_KEY = r"Arena.Application\CLSID"
 ARENA_14 = 14
+COMPATIBILITY_MODES = {ARENA_14: "arena14", 16: "arena16"}
 
 # Friendly exit names -> exit operand. Arena's exit points are hidden operands (see BasicProcess.txt /
 # AdvancedProcess.txt in the Arena folder).
@@ -342,13 +343,29 @@ def info(a):
     version = safe(lambda: a.Version)
     major = com_major_version(version)
     return {"name": safe(lambda: a.Name), "version": version, "version_major": major,
-            "compatibility_mode": "arena14" if major == ARENA_14 else "default", "arena_dir": arena_dir(a),
+            "compatibility_mode": COMPATIBILITY_MODES.get(major, "default"), "arena_dir": arena_dir(a),
             "edition": edition.describe(lic), "models_open": [a.Models.Item(i).FullName
                                                              for i in range(1, a.Models.Count + 1)]}
 
 
 def panels(a):
     return {"panels": [a.Panels.Item(i).Name for i in range(1, a.Panels.Count + 1)]}
+
+
+def named_view_regions(model):
+    views = model.NamedViews
+    regions = {}
+    for i in range(1, views.Count + 1):
+        view = views.Item(i)
+        x0, x1 = sorted((view.Left, view.Right))
+        y0, y1 = sorted((view.Top, view.Bottom))
+        regions[view.Name] = [x0, y0, x1, y1]
+    return regions
+
+
+def list_named_views(a, model):
+    m = open_model(a, model)
+    return {"model": m.FullName, "views": named_view_regions(m)}
 
 
 def defs(a, panel):

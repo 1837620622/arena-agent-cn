@@ -22,7 +22,9 @@
                                 [--per-rep]
   arena-agent scenarios model.doe cases.json [--reps N] [--measures S ...]
   arena-agent results model.doe [--per-rep] [--all]   # statistics of the last run (no new run)
-  arena-agent screenshot model.doe out.png [--region X0 Y0 X1 Y1] [--ppu P]
+  arena-agent views model.doe                   # list named views
+  arena-agent screenshot model.doe out.png [--view NAME | --region X0 Y0 X1 Y1] [--ppu P]
+  arena-agent validate model.doe [--reps N] [--png out.png] [--view NAME] [--ppu P]
   arena-agent close  [model.doe ...]
 """
 import json
@@ -187,11 +189,33 @@ def main(argv=None):
         cases = json.load(open(pos[1], encoding="utf-8"))
         res = com(core.scenarios, pos[0], cases, int(reps[0]) if reps else None, None, None,
                   opt_list(args, "--measures") or None)
+    elif cmd == "views":
+        res = com(core.list_named_views, pos[0])
     elif cmd == "screenshot":
         from .snapshot import snapshot
         region = [float(x) for x in opt_list(args, "--region")] or None
         ppu = opt_list(args, "--ppu")
-        res = com(snapshot, pos[0], pos[1], region, float(ppu[0]) if ppu else None)
+        view = opt_list(args, "--view")
+        res = com(snapshot, pos[0], pos[1], region, float(ppu[0]) if ppu else None,
+                  view_name=view[0] if view else None)
+    elif cmd == "validate":
+        from .validation import validate
+        reps = opt_list(args, "--reps")
+        png = opt_list(args, "--png")
+        view = opt_list(args, "--view")
+        ppu = opt_list(args, "--ppu")
+        try:
+            if len(pos) != 1 or any(flag in args and len(values) != 1
+                                    for flag, values in (("--reps", reps), ("--png", png), ("--view", view), ("--ppu", ppu))):
+                raise ValueError("use: arena-agent validate model.doe [--reps N] [--png out.png] [--view NAME] [--ppu P]")
+            replications = int(reps[0]) if reps else 1
+            pixels_per_unit = float(ppu[0]) if ppu else None
+        except ValueError as e:
+            out({"error": str(e)})
+            return 2
+        res = com(validate, pos[0], replications, png[0] if png else None, view[0] if view else None, pixels_per_unit)
+        out(res)
+        return 0 if res.get("ok") else 1
     elif cmd == "close":
         res = com(core.close, pos or None)
     else:

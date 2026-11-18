@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from arena_agent import core, paths, worker
+from arena_agent import core, paths, validation, worker
 
 pytestmark = pytest.mark.arena
 
@@ -26,6 +26,28 @@ def test_clinic_builds_runs_and_matches_theory(tmp_path):
     assert abs(util["average"] - 0.8) < 2 * util["half_width"] + 0.05
     assert {"Examination.Queue.Waiting Time", "Examination.Queue.WaitingTime"} & stats.keys()
     worker.call(core.close, [model])
+
+
+def test_validate_runs_native_model_without_saving_it(tmp_path):
+    model, built = build_example("clinic.json", tmp_path)
+    assert built["ok"], built
+    try:
+        def create_view(app):
+            m = core.open_model(app, model)
+            m.NamedViews.Create("Clinic detail", "V", -500, -500, 7000, 2500)
+            m.Save()
+
+        worker.call(create_view)
+        saved = (tmp_path / "clinic.doe").read_bytes()
+        views = worker.call(core.list_named_views, model)["views"]
+        assert views["Clinic detail"] == [-500, -500, 7000, 2500]
+        result = worker.call(validation.validate, model, 2)
+        assert result["ok"] and result["model_file_unchanged"], result
+        assert result["run"]["replications"] == 2 and result["run"]["end_time"] == 480
+        assert result["run"]["statistics_count"] > 0
+        assert (tmp_path / "clinic.doe").read_bytes() == saved
+    finally:
+        worker.call(core.close, [model])
 
 
 def test_bank_scenarios_more_tellers_wait_less(tmp_path):
