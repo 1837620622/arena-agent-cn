@@ -76,3 +76,6 @@ Background and evidence for each: `arena_guide("discoveries")`.
 - Arena 14 can reopen a saved model at a different zoom. Save named views for each section and select the intended view
   before capturing. At full scale, check the first and last modules, branch captions, and a running state with populated
   queue counts. Keep status numbers away from route lines and verify a multi-digit value before exporting.
+- The first screenshot tile after opening some Arena 14 named views can jump to twice the requested world coordinates.
+  `screenshot_model` checks that the displayed area covers the requested tile and retries before capturing. If the
+  view still misses the tile, it reports the affected region.

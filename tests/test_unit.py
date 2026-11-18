@@ -168,3 +168,28 @@ def test_examples_are_valid_specs():
         spec = json.load(open(os.path.join(paths.examples_dir(), f), encoding="utf-8"))
         ids = {m["id"] for m in spec["modules"]}
         assert all(c["from"] in ids and c["to"] in ids for c in spec["connections"])
+
+
+@pytest.mark.parametrize("second_zoom_works", [True, False])
+def test_screenshot_retries_misplaced_arena14_viewport(monkeypatch, second_zoom_works):
+    pytest.importorskip("win32gui")
+    from arena_agent import snapshot
+
+    class View:
+        calls = 0
+
+        def ZoomRegion(self, *region):
+            self.calls += 1
+            factor = 1 if self.calls == 2 and second_zoom_works else 2
+            self.Left, self.Top, self.Right, self.Bottom = [int(value * factor) for value in region]
+
+    monkeypatch.setattr(snapshot.time, "sleep", lambda _: None)
+    view = View()
+    region = (-15400, -18100, -7613, -14154)
+    needed = (-15400, -18100, -8236, -14470)
+    if second_zoom_works:
+        assert snapshot._zoom_for_tile(view, region, needed) == region
+    else:
+        with pytest.raises(core.ArenaError, match="could not display screenshot tile"):
+            snapshot._zoom_for_tile(view, region, needed)
+    assert view.calls == 2

@@ -67,6 +67,20 @@ def modules_bbox(m):
     return min(xs0), min(min(ys0), min(ys1)), max(xs1), max(max(ys0), max(ys1))
 
 
+def _zoom_for_tile(view, requested, needed):
+    """Read back the viewport before capturing. Arena 14 can double its first ZoomRegion coordinates."""
+    x0, y0, x1, y1 = needed
+    for _ in range(2):
+        view.ZoomRegion(*requested)
+        time.sleep(0.5)
+        left, top, right, bottom = view.Left, view.Top, view.Right, view.Bottom
+        # View bounds are rounded to integer model units.
+        if (left <= x0 + 2 and right >= x1 - 2
+                and min(top, bottom) <= y0 + 2 and max(top, bottom) >= y1 - 2):
+            return left, top, right, bottom
+    raise ArenaError(f"Arena could not display screenshot tile {needed}; reduce the zoom or select a smaller region")
+
+
 def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64):
     """Write a PNG of the flowchart. region: [x0, y0, x1, y1] in model units (default: all flowchart modules).
     ppu: screen pixels per model unit; default fits the region into one screen (readable for small models)."""
@@ -94,30 +108,36 @@ def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64):
         X0, Y0, X1, Y1 = modules_bbox(m)
         mg = 400
         X0, Y0, X1, Y1 = X0 - mg, Y0 - mg, X1 + mg, Y1 + mg
+    if not (X0 < X1 and Y0 < Y1):
+        raise ArenaError("screenshot region must have increasing x and y bounds")
     if not ppu:
-        ppu = min(pw / (X1 - X0), ph / abs(Y1 - Y0)) * 0.9  # one tile
+        ppu = min(pw / (X1 - X0), ph / (Y1 - Y0)) * 0.9  # one tile
+    if not math.isfinite(ppu) or ppu <= 0:
+        raise ArenaError("screenshot pixels per unit must be positive and finite")
     tw, th = pw / ppu * 0.92, ph / ppu * 0.92  # tile step in world units (8% overlap)
-    nx, ny = max(1, math.ceil((X1 - X0) / tw)), max(1, math.ceil(abs(Y1 - Y0) / th))
+    nx, ny = max(1, math.ceil((X1 - X0) / tw)), max(1, math.ceil((Y1 - Y0) / th))
     if nx * ny > max_tiles:
         raise ArenaError(f"{nx * ny} tiles needed at ppu={ppu}; lower ppu or pick a smaller region")
-    tiles = []
+    W = max(1, round((X1 - X0) * ppu))
+    H = max(1, round((Y1 - Y0) * ppu))
+    canvas = Image.new("RGB", (W, H), "white")
     for j in range(ny):
         for i in range(nx):
             x, y = X0 + i * tw, Y0 + j * th
-            v.ZoomRegion(x, y, x + pw / ppu, y + ph / ppu)
-            time.sleep(0.5)
-            tiles.append((v.Left, v.Top, v.Right, v.Bottom, ImageGrab.grab(bbox=pr, all_screens=True)))
-    L, T, R, B, _ = tiles[0]
-    sx = pw / (R - L)
-    sy = ph / (B - T)  # negative if world y grows upward on screen
-    W = max(1, int(round((X1 - X0) * sx)))
-    H = max(1, int(round(abs((Y1 - Y0) * sy))))
-    canvas = Image.new("RGB", (W, H), "white")
-    for L, T, R, B, img in tiles:
-        px = int(round((L - X0) * sx))
-        py = int(round((T - Y0) * sy)) if sy > 0 else int(round((Y1 - T) * -sy))
-        canvas.paste(img, (px, py))
+            requested = (x, y, x + pw / ppu, y + ph / ppu)
+            needed = (x, y, min(x + tw, X1), min(y + th, Y1))
+            left, top, right, bottom = _zoom_for_tile(v, requested, needed)
+            px, right_px = round((left - X0) * ppu), round((right - X0) * ppu)
+            if bottom >= top:
+                py, bottom_px = round((top - Y0) * ppu), round((bottom - Y0) * ppu)
+            else:
+                py, bottom_px = round((Y1 - top) * ppu), round((Y1 - bottom) * ppu)
+            img = ImageGrab.grab(bbox=pr, all_screens=True)
+            size = (max(1, right_px - px), max(1, bottom_px - py))
+            if size != img.size:
+                img = img.resize(size, Image.Resampling.BICUBIC)
+            canvas.paste(img, (px, py))
     out_path = os.path.abspath(out_path)
     canvas.save(out_path)
-    return {"out": out_path, "size": [W, H], "tiles": len(tiles), "region": [X0, Y0, X1, Y1],
+    return {"out": out_path, "size": [W, H], "tiles": nx * ny, "region": [X0, Y0, X1, Y1],
             "note": "grabbed from the screen: if it shows another window, bring Arena to the front and retry"}
