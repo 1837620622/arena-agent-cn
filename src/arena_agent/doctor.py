@@ -39,7 +39,7 @@ def run(start_arena=True):
             pythoncom.CoInitialize()
             inf = core.info(core.app())
             ed = inf["edition"]
-            checks.append(_check("arena COM", True, f"Arena {inf['version']} responded"))
+            checks.append(_check("arena COM", True, f"Arena {inf['version']} responded ({inf['compatibility_mode']})"))
             checks.append(_check("edition", ed["status"] in ("full", "limited"),
                                  f"{ed['name']} license, status {ed['status']}" +
                                  (f" (report header: {ed['report_license']})" if ed.get("report_license") else ""),

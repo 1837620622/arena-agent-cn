@@ -13,7 +13,8 @@ command prints JSON.
 
 ## First, every session
 
-1. `arena_status`. It starts Arena if needed (up to a minute) and reports the version and the **edition**.
+1. `arena_status`. It starts Arena if needed (up to a minute) and reports the active COM version, compatibility mode,
+   and **edition**. Arena 14.x selects the text-report batch workflow automatically.
    - `edition.status == "unknown"`: ask the user once, "Are you on the free Arena Student edition, or a full / university
      lab license?", then `set_edition(limited=true|false)`.
    - `"limited"`: keep models small. Rockwell does not publish the exact cap; the Student edition is commonly reported
@@ -41,6 +42,12 @@ command prints JSON.
 5. **Fix until clean.** `build_model` compiles at the end. Every `check_errors` entry names the module at fault; also
    act on `errors` (operands Arena rejected, invalid choices), `warnings` and `dropped_connections`. Re-run
    `check_model` after fixes. The common traps are in `arena_guide("gotchas")`; read it before your first model.
+   Plan the reading order before placing modules. Give the main flow a consistent left-to-right grid and put alternate
+   branches on separate rows. Use explicit `x`, `y` in the spec for the final layout. Give module labels room inside
+   their own shapes and leave space for branch captions and queue indicators. Fix any `layout:` overlaps reported by
+   the build, then open the exported PNG at 100% and check all labels, arrowheads and route joins. For a large model,
+   save named views for subsystem logic and animation. Export one overview and readable details. Reopen the saved
+   model, recheck the connections and rerun the same inputs after layout changes.
 6. **Verify.** Run a few replications and sanity-check against theory or hand calculations: utilization ~ arrival
    rate x service time / servers; flow conservation (in = out + still inside); for simple queues compare with M/M/c
    formulas. Look at the flowchart with `screenshot_model` when layout or connections are in doubt.

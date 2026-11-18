@@ -1,6 +1,7 @@
 # Gotchas: Arena through COM
 
-All verified on Arena 16.20. Most are handled by arena-agent already; they are listed so you recognise the symptoms.
+The original findings were verified on Arena 16.20. The native Arena 14 checks below were verified on Arena 14.0
+(COM 1400).
 Background and evidence for each: `arena_guide("discoveries")`.
 
 ## Building
@@ -55,5 +56,31 @@ Background and evidence for each: `arena_guide("discoveries")`.
 19. **Two edits must never run into the same model at once.** The MCP server serialises calls; do not also run CLI
     builds on the same file from a background shell at the same time.
 20. **Screenshots read the screen.** Anything covering Arena's window spoils `screenshot_model`.
+    For readable details, set `region` to the section bounds and raise `pixels_per_unit` until the labels are legible.
+    Leave a margin around the outer modules and their connectors. Inspect tiled images at 100% for broken lines at
+    the joins and for labels that Arena wraps against a module border. Shorten a crowded label if its full text
+    will not fit, then check any references and rerun the model.
 21. Arena's report database is `<model>.db` (SQLite in Arena 16+), the text report `<model>.out`, errors `<model>.err`
     (binary; arena-agent decodes it and maps each record to its module).
+
+## Arena 14
+
+- The agent checks the installed executable's major version before a cold launch and the active COM version for
+  each build, check, and run. COM versions in the 1400–1499 range use the Arena 14.x report settings. Record rows
+  follow the actual template: a flat Record takes one row, and a definition with a repeat group accepts indexed rows.
+  The active version and compatibility mode are shown by `arena_status` and `arena-agent doctor`.
+- A fresh COM launch can fail during Check with `FOPEN`, `SIM.out` and `Permission denied`. The agent starts Arena 14
+  in a writable working directory. If an existing instance was started in a protected directory, close it normally
+  after saving your work, then let the agent start Arena again.
+- `Not a valid password.` and DAO/Jet initialization dialogs can occur during Check or Run on an ordinary, unprotected
+  model. This path uses the legacy Access report database. For Arena 14 checks and batch runs, the agent temporarily
+  sets `DisableReportDatabase` and reads the native `.out`. It restores the model setting afterward. A password prompt
+  while opening a protected model or activating Arena still requires the proper model credentials or license.
+- `.out` uses the native text identifiers, e.g. `Queue1.WaitingTime`. Arena 16+ SQLite reports can use spacing such as
+  `Queue1.Waiting Time`. Text results use the printed precision of the report for per-replication analysis.
+- Arena 14 can reopen a saved model at a different zoom. Save named views for each section and select the intended view
+  before capturing. At full scale, check the first and last modules, branch captions, and a running state with populated
+  queue counts. Keep status numbers away from route lines and verify a multi-digit value before exporting.
+- The first screenshot tile after opening some Arena 14 named views can jump to twice the requested world coordinates.
+  `screenshot_model` checks that the displayed area covers the requested tile and retries before capturing. If the
+  view still misses the tile, it reports the affected region.

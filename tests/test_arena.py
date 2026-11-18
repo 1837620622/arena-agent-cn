@@ -20,25 +20,52 @@ def test_clinic_builds_runs_and_matches_theory(tmp_path):
     assert res["ok"], res
     run = worker.call(core.run, model)
     assert run["ok"] and run["end_time"] == 480
-    util = run["statistics"]["Doctor.Instantaneous Utilization"]
+    stats = run["statistics"]
+    util = stats.get("Doctor.Instantaneous Utilization") or stats["Doctor.Utilization"]
     # arrival rate 1/5 per minute, mean exam 12 minutes, 3 doctors: utilization 0.8
     assert abs(util["average"] - 0.8) < 2 * util["half_width"] + 0.05
-    assert "Examination.Queue.Waiting Time" in run["statistics"]
+    assert {"Examination.Queue.Waiting Time", "Examination.Queue.WaitingTime"} & stats.keys()
     worker.call(core.close, [model])
 
 
 def test_bank_scenarios_more_tellers_wait_less(tmp_path):
     model, res = build_example("bank.json", tmp_path)
     assert res["ok"], res
+    saved_model = (tmp_path / "bank.doe").read_bytes()
+    original_report_settings = worker.call(report_settings, model)
     out = worker.call(core.scenarios, model, [{"name": "2", "changes": {"Teller": {"Capacity": "2"}}},
                                               {"name": "3", "changes": {"Teller": {"Capacity": "3"}}}], 10)
-    w = [s["statistics"]["Teller Service.Queue.Waiting Time"]["average"] for s in out["scenarios"]]
+    assert all(s["ok"] for s in out["scenarios"]), out
+    if original_report_settings is not None:
+        assert all(s["results_source"].lower().endswith(".out") for s in out["scenarios"])
+    w = [(s["statistics"].get("Teller Service.Queue.Waiting Time") or
+          s["statistics"]["Teller Service.Queue.WaitingTime"])["average"] for s in out["scenarios"]]
     assert w[1] < w[0]
     # the saved model is unchanged by scenario runs
     ins = worker.call(core.inspect, model, True)
     teller = next(m for m in ins["modules"] if m["name"] == "Teller")
     assert teller["ops"]["Capacity"] == "2"
+    assert worker.call(report_settings, model) == original_report_settings
+    assert (tmp_path / "bank.doe").read_bytes() == saved_model
     worker.call(core.close, [model])
+
+
+def report_settings(app, model):
+    m = core.open_model(app, model)
+    if core.com_major_version(app.Version) == 14:
+        return m.DisableReportDatabase, m.DisplayDefaultReport
+    return None
+
+
+def test_overlap_is_reported_at_native_module_bounds(tmp_path):
+    spec = {"save_as": str(tmp_path / "layout.doe"), "check": False, "modules": [
+        {"id": "a", "type": "Create", "x": 2000, "y": 2000, "data": {"Name": "Arrivals"}},
+        {"id": "b", "type": "Dispose", "x": 2000, "y": 2000, "data": {"Name": "Departures"}},
+        {"id": "c", "type": "Dispose", "data": {"Name": "Automatic Position"}},
+    ]}
+    res = worker.call(core.build, spec)
+    assert "layout: 'Arrivals' overlaps 'Departures'" in res["warnings"]
+    worker.call(core.close, [spec["save_as"]])
 
 
 def test_check_maps_error_to_module(tmp_path):

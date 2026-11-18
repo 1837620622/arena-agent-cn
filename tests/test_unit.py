@@ -2,6 +2,7 @@
 import json
 import math
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,8 +32,60 @@ def test_used_names_process_and_create():
 
 
 def test_reserved_clashes_without_arena(monkeypatch):
-    monkeypatch.setattr(core, "_reserved", {"wait", "group"})
+    monkeypatch.setattr(core, "reserved_words", lambda _: {"wait", "group"})
     assert core.reserved_clashes({"Wait", "RWait", "Group.Queue", "group"}) == ["Wait", "group"]
+
+
+def test_running_arena_selects_its_own_reserved_words(tmp_path, monkeypatch):
+    older = tmp_path / "older"
+    newer = tmp_path / "newer"
+    for folder, name in ((older, "OlderWord"), (newer, "NewerWord")):
+        folder.mkdir()
+        (folder / "Blocks.txt").write_text(f"Module: {name}\n", encoding="utf-8")
+    monkeypatch.setenv("ARENA_DIR", str(older))
+    names = {"OlderWord", "NewerWord"}
+    assert core.reserved_clashes(names) == ["OlderWord"]
+    assert core.reserved_clashes(names, SimpleNamespace(FullName=str(newer / "Arena.exe"))) == ["NewerWord"]
+
+
+@pytest.mark.parametrize(("version", "uses_text_reports"), [
+    (1400, True), (1470, True), (1500, False), (1620, False), (None, False),
+])
+def test_active_version_selects_report_settings(version, uses_text_reports, monkeypatch):
+    app = SimpleNamespace(Version=version)
+    model = SimpleNamespace(Application=app, FullName="model.doe", QuietMode=False, BatchMode=False,
+                            DisableReportDatabase=False, DisplayDefaultReport=0, State=0, Activate=lambda: None)
+    checked = []
+    model.Check = lambda: checked.append((model.QuietMode, model.DisableReportDatabase))
+    monkeypatch.setattr(core, "connection_list", lambda _: [])
+    monkeypatch.setattr(core, "end_other_runs", lambda _: [])
+
+    def run_batch(model, ended, show, outputs, per_replication, legacy=False):
+        assert legacy == uses_text_reports
+        assert model.DisableReportDatabase == uses_text_reports
+        assert model.DisplayDefaultReport == int(uses_text_reports)
+        return "ran"
+
+    monkeypatch.setattr(core, "_run_batch", run_batch)
+    assert core.check_model(model) == ([], [])
+    assert checked == [(True, uses_text_reports)]
+    assert core._run_once(app, model, None, True) == "ran"
+    assert not model.DisableReportDatabase and model.DisplayDefaultReport == 0
+
+
+@pytest.mark.parametrize(("major", "record_array"), [(14, False), (14, True), (16, False), (16, True)])
+def test_record_rows_follow_the_loaded_template(major, record_array):
+    operands = SimpleNamespace(Count=1, Item=lambda _: SimpleNamespace(Array=record_array))
+    definition = SimpleNamespace(Name="Record", Operands=operands)
+    spec = {"rows": [{"Type": "Count"}]}
+    operand = "Type(1)" if record_array else "Type"
+    assert core._expand_for_definition(spec, definition, major) == [(operand, "Count")]
+    spec["rows"].append({"Type": "Time Interval"})
+    if record_array:
+        assert core._expand_for_definition(spec, definition, major)[-1] == ("Type(2)", "Time Interval")
+    else:
+        with pytest.raises(core.ArenaError, match="takes one row"):
+            core._expand_for_definition(spec, definition, major)
 
 
 def test_parse_out_summary():
@@ -51,6 +104,26 @@ def test_parse_out_single_replication():
     assert res["Patient.WaitTime"]["half_width"] == "(Insuf)"
     assert res["Examination.Queue.NumberInQueue"]["section"] == "Discrete-Change Variables"
     assert res["Patient.NumberIn"]["value"] == pytest.approx(82)
+
+
+def test_text_fallback_uses_each_printed_replication(tmp_path):
+    txt = open(os.path.join(DATA, "clinic.out"), errors="replace").read()
+    out = tmp_path / "clinic.out"
+    out.write_text(txt)
+    stats = results.read(str(out.with_suffix(".doe")), per_replication=True)["statistics"]
+    wait = stats["Examination.Queue.WaitingTime"]
+    assert wait["n"] == 10
+    assert wait["replications"][:3] == [5.9228, 32.970, 5.2357]
+    assert stats["Doctor.ScheduledUtilization"]["average"] == pytest.approx(0.79324)
+    assert len(stats["Doctor.ScheduledUtilization"]["replications"]) == 10
+
+
+def test_text_report_accepts_lowercase_exponent_and_correlation_flag():
+    txt = "TALLY VARIABLES\nIdentifier  Average  Half Width  Minimum  Maximum\nWait  -1.2e-03  (Corr)  -.02  +.1\n"
+    row = results.parse_out(txt)["Wait"]
+    assert row["average"] == pytest.approx(-0.0012)
+    assert row["half_width"] == "(Corr)"
+    assert row["maximum"] == pytest.approx(0.1)
 
 
 def test_read_db_matches_out_summary():
@@ -148,3 +221,28 @@ def test_examples_are_valid_specs():
         spec = json.load(open(os.path.join(paths.examples_dir(), f), encoding="utf-8"))
         ids = {m["id"] for m in spec["modules"]}
         assert all(c["from"] in ids and c["to"] in ids for c in spec["connections"])
+
+
+@pytest.mark.parametrize("second_zoom_works", [True, False])
+def test_screenshot_retries_misplaced_arena14_viewport(monkeypatch, second_zoom_works):
+    pytest.importorskip("win32gui")
+    from arena_agent import snapshot
+
+    class View:
+        calls = 0
+
+        def ZoomRegion(self, *region):
+            self.calls += 1
+            factor = 1 if self.calls == 2 and second_zoom_works else 2
+            self.Left, self.Top, self.Right, self.Bottom = [int(value * factor) for value in region]
+
+    monkeypatch.setattr(snapshot.time, "sleep", lambda _: None)
+    view = View()
+    region = (-15400, -18100, -7613, -14154)
+    needed = (-15400, -18100, -8236, -14470)
+    if second_zoom_works:
+        assert snapshot._zoom_for_tile(view, region, needed) == region
+    else:
+        with pytest.raises(core.ArenaError, match="could not display screenshot tile"):
+            snapshot._zoom_for_tile(view, region, needed)
+    assert view.calls == 2

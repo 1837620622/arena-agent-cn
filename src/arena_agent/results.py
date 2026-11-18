@@ -7,8 +7,8 @@ replication; warm-up rows are already excluded. Across replications this module 
 half-width (t distribution, n - 1 degrees of freedom, as Arena's own report), the minimum and maximum of the
 replication values, and n.
 
-Fallback (no .db, e.g. older Arena with an Access database): the SIMAN summary report <model>.out, which has the
-across-replication table for Outputs and Counters only.
+Fallback (no .db, e.g. Arena 14): the SIMAN summary report <model>.out. Where there is no native aggregate,
+derive it from the printed replication values.
 """
 import math
 import os
@@ -89,8 +89,10 @@ def read(model_path, since=0, per_replication=False, include_empty=False):
             pass  # not SQLite (older Arena): fall back to the text report
     out = base + ".out"
     if os.path.exists(out) and os.path.getmtime(out) >= since:
-        return {"source": out, "statistics": parse_out(open(out, errors="replace").read()),
-                "note": "from the text report: only Outputs and Counters are summarised across replications"}
+        with open(out, errors="replace") as report:
+            stats = text_statistics(report.read(), per_replication)
+        return {"source": out, "statistics": stats,
+                "note": "from the SIMAN text report, with native labels and printed precision"}
     return {"source": None, "statistics": {}, "note": "no results from this run (no .db or .out written)"}
 
 
@@ -107,7 +109,7 @@ def report_license(model_path):
     return None
 
 
-NUM = r"(-?[\d.]+(?:E[-+]?\d+)?|\(Insuf\)|\(Correl\)|--)"
+NUM = r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?|\(Insuf\)|\(Corr(?:el)?\)|--)"
 
 
 def _num(x):
@@ -151,7 +153,31 @@ def parse_out(txt):
             continue
         mm = re.match(r"^(\S[^\n]*?)\s{2,}(\S.*)$", line)
         if mm and cols:
-            vals = re.findall(NUM, mm.group(2))
-            if len(vals) >= 1 and len(vals) <= len(cols):
+            vals = mm.group(2).split()
+            if len(vals) == len(cols) and all(re.fullmatch(NUM, v) for v in vals):
                 res[mm.group(1).strip()] = {"section": section, **{c: _num(v) for c, v in zip(cols, vals)}}
     return res
+
+
+def text_statistics(text, per_replication=False):
+    result = parse_out(text)
+    body = text.split("Output Summary for", 1)[0]
+    blocks = re.split(r"^\s*Summary for Replication\s+\d+\s+of\s+\d+\s*$", body, flags=re.M)[1:]
+    if len(blocks) <= 1 and not per_replication:
+        return result
+
+    replications = [parse_out(block) for block in blocks] if blocks else [result]
+    samples = {}
+    for index, replication in enumerate(replications):
+        for name, record in replication.items():
+            value = record.get("average", record.get("value", record.get("count")))
+            section, values = samples.setdefault(name, (record["section"], [None] * len(replications)))
+            if isinstance(value, (int, float)):
+                values[index] = value
+    for name, (section, values) in samples.items():
+        if name not in result:
+            stats = summarize(values)
+            result[name] = {"section": section, **stats, "reps": stats["n"]}
+        if per_replication:
+            result[name]["replications"] = values
+    return result
