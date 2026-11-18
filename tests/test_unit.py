@@ -305,10 +305,11 @@ def test_active_version_selects_report_settings(version, uses_text_reports, monk
     monkeypatch.setattr(core, "end_other_runs", lambda _: [])
     monkeypatch.setattr(core.edition, "describe", lambda _: {})
 
-    def run_batch(model, ended, show, outputs, per_replication, legacy=False):
+    def run_batch(model, ended, show, outputs, per_replication, legacy=False, timeout=None):
         assert legacy == uses_text_reports
         assert model.DisableReportDatabase == uses_text_reports
         assert model.DisplayDefaultReport == int(uses_text_reports)
+        assert model.BatchMode and model.QuietMode
         return "ran"
 
     monkeypatch.setattr(core, "_run_batch", run_batch)
@@ -319,6 +320,7 @@ def test_active_version_selects_report_settings(version, uses_text_reports, monk
     assert checked == [(True, uses_text_reports)]
     assert core._run_once(app, model, None, True) == "ran"
     assert not model.DisableReportDatabase and model.DisplayDefaultReport == 0
+    assert not model.BatchMode and not model.QuietMode
 
 
 def test_com_major_version_accepts_text_from_com():
@@ -599,7 +601,7 @@ def test_cli_rejects_a_bad_set_expression_as_json(capsys):
 def test_cli_signals_a_failed_scenario(tmp_path, monkeypatch, capsys):
     cases = tmp_path / "cases.json"
     cases.write_text('[{"name":"bad"}]', encoding="utf-8")
-    monkeypatch.setattr(cli, "com", lambda *_: {"scenarios": [{"name": "bad", "ok": False}]})
+    monkeypatch.setattr(cli, "com", lambda *_, **__: {"scenarios": [{"name": "bad", "ok": False}]})
     assert cli.main(["scenarios", "m.doe", str(cases)]) == 1
     assert not json.loads(capsys.readouterr().out)["scenarios"][0]["ok"]
 
@@ -619,11 +621,29 @@ def test_run_setup_is_read_and_restored_with_raw_com_values():
 
 def test_invalid_run_setup_does_not_start_or_leave_partial_changes(monkeypatch):
     model = SimpleNamespace(FullName="m.doe", NumberOfReplications=5)
+    app = SimpleNamespace(Models=SimpleNamespace(Count=0))
     monkeypatch.setattr(core, "open_model", lambda *_: model)
-    monkeypatch.setattr(core, "_run_once", lambda *_: pytest.fail("invalid run started"))
-    result = core.run(None, "m.doe", setup_fields={"replications": 4, "not_a_field": 5})
+    monkeypatch.setattr(core, "_run_once", lambda *_, **__: pytest.fail("invalid run started"))
+    result = core.run(app, "m.doe", setup_fields={"replications": 4, "not_a_field": 5})
     assert not result["ok"] and "unknown field" in result["errors"][0]["message"]
     assert model.NumberOfReplications == 5
+
+
+def test_batch_timeout_is_forwarded_before_a_model_path(monkeypatch, capsys):
+    def com(fn, model, *args, timeout):
+        assert fn is core.run and model == "m.doe" and timeout == 18.5
+        return {"timed_out": True, "ok": False}
+    monkeypatch.setattr(cli, "com", com)
+    assert cli.main(["run", "--timeout", "18.5", "m.doe"]) == 1
+    assert json.loads(capsys.readouterr().out)["timed_out"]
+
+
+def test_batch_checks_every_model_before_ending_completed_run():
+    finished = SimpleNamespace(State=12, Name="finished", End=lambda: pytest.fail("finished run was changed"))
+    paused = SimpleNamespace(State=16, Name="paused", End=lambda: pytest.fail("paused run was ended"))
+    app = SimpleNamespace(Models=SimpleNamespace(Count=2, Item=lambda i: [finished, paused][i-1]))
+    with pytest.raises(core.ArenaError, match="paused"):
+        core.end_other_runs(app)
 
 
 def test_extension_band_stays_inside_the_arena_view():

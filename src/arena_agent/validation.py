@@ -7,7 +7,7 @@ from pathlib import Path
 from . import core
 
 
-def validate(a, model, replications=1, png_path=None, view_name=None, pixels_per_unit=None):
+def validate(a, model, replications=1, png_path=None, view_name=None, pixels_per_unit=None, *, timeout=None):
     if type(replications) is not int or replications < 1:
         raise core.ArenaError("replications must be a positive integer")
     if png_path is None and (view_name is not None or pixels_per_unit is not None):
@@ -31,20 +31,20 @@ def validate(a, model, replications=1, png_path=None, view_name=None, pixels_per
               "compatibility_mode": status["compatibility_mode"]}
     checked = result["check"] = core.check(a, str(path))
     if checked["ok"]:
-        # 新版批跑也可能改变视图所属模型的运行选项，验收完恢复原值。
-        with core.temporary_settings(m, QuietMode=True, BatchMode=True):
-            replay = core.run(a, str(path), reps=replications)
-        run_ok = (replay["ok"] and replay["replications"] == replications
+        replay = core.run(a, str(path), reps=replications, timeout=timeout)
+        run_ok = (replay["ok"] and replay.get("replications") == replications
                   and bool(replay.get("results_source")) and bool(replay.get("statistics")))
         result["run"] = {
             "ok": run_ok,
-            "replications": replay["replications"],
-            "end_time": replay["end_time"],
+            "replications": replay.get("replications"),
+            "end_time": replay.get("end_time"),
             "results_source": replay.get("results_source"),
             "statistics_count": len(replay.get("statistics", {})),
             "errors": replay["errors"],
             "results_note": replay.get("results_note"),
         }
+        if replay.get("timed_out"):
+            result["run"]["timed_out"] = True
         result["ok"] = run_ok and not checked["layout_warnings"]
         if run_ok and png_path is not None:
             from .snapshot import snapshot

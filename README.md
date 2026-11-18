@@ -81,6 +81,14 @@ arena-agent results bank.doe --per-rep
 
 `validate` 依次调用 Arena 原生 Check 和批跑，报告布局警告、结束时间、重复次数、原生结果来源和统计项数量，并比对验收前后的 DOE 文件哈希。`ok: true` 表示这些检查通过。原生 `.out` 或 `.db` 等运行文件保存在模型旁，需要隔离结果时请先复制模型及其相对路径依赖。
 
+### 批跑超时和场景回退
+
+Arena 14 的批跑默认等待 300 秒。长任务可以用 `arena-agent run bank.doe --reps 30 --timeout 900` 延长，`scenarios` 和 `validate` 同样支持 `--timeout`。MCP 的 `run_model`、`run_scenarios`、`validate_model` 使用 `timeout` 参数。时间以墙钟秒计，场景比较对每个场景单独计时。
+
+已有运行或暂停中的模型会保留原状态，批跑返回提示。场景参数先检查原值是否可读，临时改名和参数会在运行结束后恢复。Arena 14 批跑等待超时会返回 `timed_out: true`、请求 Arena 结束该次运行，并避免把未完成报表当作本轮结果。该时限约束的是批跑轮询，Windows COM 调用本身和 Arena 的模态对话框由应用控制。Arena 16 保留原生同步批跑方式。
+
+`arena-agent close model.doe` 和 MCP 的 `close_models` 默认只关闭空闲、已保存的模型。Arena 将文档标记为已修改时，可回到界面决定保存或放弃。要明确保存一个已命名的模型并关闭，可用 `arena-agent close model.doe --save`，或在 MCP 传入 `save_changes: true`。
+
 命令行成功时退出码为 0；结果带 `error` 或 `ok: false`（Check、建模或批跑失败）时为 1；参数或用法错误时为 2。脚本里可以据此串联步骤。
 
 Arena 14 批跑以本轮原生 `.out` 中的统计为准。`results` 离线回读时，从已有的可读报告中按最后写入时间选取最新结果。

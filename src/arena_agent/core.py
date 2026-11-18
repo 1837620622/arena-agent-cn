@@ -27,6 +27,7 @@ SEARCH_NAME = 2  # smFindName
 CLSID_KEY = r"Arena.Application\CLSID"
 ARENA_14 = 14
 COMPATIBILITY_MODES = {ARENA_14: "arena14", 16: "arena16"}
+DEFAULT_BATCH_TIMEOUT = 300
 
 # Friendly exit names -> exit operand. Arena's exit points are hidden operands (see BasicProcess.txt /
 # AdvancedProcess.txt in the Arena folder).
@@ -920,9 +921,8 @@ def delete(a, model, names):
     return {"model": m.FullName, **report}
 
 
-def close(a, models=None):
-    """Close open models (saving nothing). With no paths, closes every model this Arena has open. Arena can crash
-    on Close(); a crash is reported, and the next call starts a fresh Arena."""
+def close(a, models=None, *, save_changes=False):
+    """关闭空闲模型。Arena 的静默 Close 可能保存修改，默认保留未保存的文档。"""
     closed, failed = [], []
     want = [os.path.abspath(p).lower() for p in models or []]
     for i in range(a.Models.Count, 0, -1):
@@ -931,13 +931,24 @@ def close(a, models=None):
         if not want or full.lower() in want:
             name = full
             try:
+                if m.State:
+                    failed.append({"model": name, "error": "end the active run in Arena before closing"})
+                    continue
+                if not m.Saved:
+                    if not save_changes:
+                        failed.append({"model": name, "error": "unsaved changes; save or discard them in Arena first"})
+                        continue
+                    if not full:
+                        failed.append({"model": name, "error": "an unsaved model needs a path before it can be closed"})
+                        continue
+                    m.Save()
                 safe(lambda: setattr(m, "QuietMode", True))  # a missing property must not abort the close
                 m.Close()
                 closed.append(name)
             except pythoncom.com_error as e:
                 failed.append({"model": name, "error": str(e)})
                 break
-    return {"closed": closed, "failed": failed}
+    return {"ok": not failed, "closed": closed, "failed": failed}
 
 
 def set_data(a, model, module, data, save=True):
@@ -1110,58 +1121,72 @@ def evaluate(m, expr):
 
 
 def end_other_runs(a):
-    """Arena runs one model at a time: a model left in run mode (State != 0, e.g. 12 after an ended run whose End()
-    failed) makes Go() on any other model wait ~2 min and return without running. End them all first."""
-    ended = []
+    """清理已完成但仍在运行模式的模型。保留用户正在运行或暂停的模型。"""
+    stale = []
     for i in range(1, a.Models.Count + 1):
-        other = a.Models.Item(i)
-        if safe(lambda: other.State, 0) != 0:
-            safe(lambda: other.End())
-            ended.append(safe(lambda: other.Name) or "(unnamed model)")
+        model = a.Models.Item(i)
+        state = model.State
+        if state in (12, 21):  # smStateRunComplete / smStatePlaybackRunComplete
+            stale.append(model)
+        elif state:
+            raise ArenaError(f"Arena model {model.Name!r} is active (state {state}); end the run before starting a batch")
+    ended = []
+    for model in stale:
+        model.End()
+        if model.State:
+            raise ArenaError(f"Arena model {model.Name!r} is still in run mode after End()")
+        ended.append(model.Name)
     return ended
 
 
-def _run_once(a, m, show, outputs, per_replication=False):
-    ended_first = end_other_runs(a)
+def _run_once(a, m, show, outputs, per_replication=False, *, ended_first=(), timeout=None):
     m.Activate()
-    if com_major_version(safe(lambda: a.Version)) != ARENA_14:
-        return _run_batch(m, ended_first, show, outputs, per_replication)
-
+    legacy = com_major_version(safe(lambda: a.Version)) == ARENA_14
+    settings = {"QuietMode": True, "BatchMode": True}
     # Arena 14 can open a modal DAO/Jet error during COM startup. A batch run only needs SIMAN's text report.
-    with temporary_settings(m, DisableReportDatabase=True, DisplayDefaultReport=1, BatchMode=True, QuietMode=True):
+    if legacy:
+        settings.update(DisableReportDatabase=True, DisplayDefaultReport=1)
+    with temporary_settings(m, **settings):
         try:
-            return _run_batch(m, ended_first, show, outputs, per_replication, legacy=True)
+            return _run_batch(m, ended_first, show, outputs, per_replication, legacy=legacy, timeout=timeout)
         finally:
             if safe(lambda: m.State, 0):
                 safe(lambda: m.End())
 
 
-def _run_batch(m, ended_first, show, outputs, per_replication, legacy=False):
-    # Batch settings belong to this run: a model left in batch mode afterwards behaves oddly in the Arena GUI.
-    with temporary_settings(m, QuietMode=True, BatchMode=True):
-        return _run_batch_locked(m, ended_first, show, outputs, per_replication, legacy)
-
-
-def _run_batch_locked(m, ended_first, show, outputs, per_replication, legacy):
+def _run_batch(m, ended_first, show, outputs, per_replication, legacy=False, timeout=None):
     t0 = time.time()
+    started = time.monotonic()
+    timed_out = False
     model_path = safe(lambda: m.FullName) or ""  # an unsaved model has no report beside it
     if legacy:
+        timeout = DEFAULT_BATCH_TIMEOUT if timeout is None else timeout
+        start_deadline = started + 15
+        deadline = None
         m.Go(2)  # smGoReturn keeps the COM apartment responsive on Arena 14.
-        start_deadline = time.monotonic() + 15
         state = m.State
         while state not in (7, 8, 9, 10, 12, 16, 17, 18, 19, 20, 21):
-            if state == 0 and time.monotonic() >= start_deadline:
+            now = time.monotonic()
+            # Go(2) 可能只发起了 COM 请求。等 Arena 真正进入运行态后，再启动批跑计时。
+            if deadline is None and state in (11, 13, 14, 15):
+                deadline = now + timeout
+            limit = start_deadline if deadline is None else deadline
+            if now >= limit:
+                timed_out = deadline is not None
                 break
             pythoncom.PumpWaitingMessages()
-            time.sleep(0.05)
+            time.sleep(min(0.05, limit - now))
             state = m.State
     else:
         m.Go(1)  # smGoWait: returns when the run ends
-    res = {"seconds": round(time.time() - t0, 1), "end_time": safe(lambda: m.SIMAN.RunCurrentTime),
+    res = {"seconds": round(time.monotonic() - started, 1), "end_time": safe(lambda: m.SIMAN.RunCurrentTime),
            "replications": safe(lambda: int(m.NumberOfReplications)), "errors": []}
     if ended_first:
         res["ended_first"] = ended_first
-    if res["end_time"] is None:
+    if timed_out:
+        res["timed_out"] = True
+        res["errors"].append({"level": "error", "message": f"Arena 14 batch exceeded {timeout:g} seconds"})
+    elif res["end_time"] is None:
         res["errors"].append({"level": "error", "message": "the run did not start (no SIMAN run state after Go)"})
     elif legacy and state != 12:  # smStateRunComplete
         res["errors"].append({"level": "error", "message": f"Arena 14 run stopped before completion (State {state})"})
@@ -1169,7 +1194,7 @@ def _run_batch_locked(m, ended_first, show, outputs, per_replication, legacy):
     fresh = lambda: bool(p) and os.path.exists(p) and os.path.getmtime(p) > t0  # noqa: E731
     if fresh():
         res["errors"].extend(read_err(m))
-    if show:  # read before End(), which resets the run; a bad expression writes its own record to .err
+    if show and not timed_out:  # read before End(), which resets the run
         before_show = read_err(m) if fresh() else []
         res["values"] = {e: evaluate(m, e) for e in show}
         after_show = read_err(m) if fresh() else []
@@ -1180,12 +1205,22 @@ def _run_batch_locked(m, ended_first, show, outputs, per_replication, legacy):
         res["errors"].append({"level": "error", "message": edition.LIMIT_MESSAGE})
     safe(lambda: m.End())
     left_state = safe(lambda: m.State, 0)
+    if timed_out:
+        stop_deadline = time.monotonic() + 5
+        while left_state and time.monotonic() < stop_deadline:
+            pythoncom.PumpWaitingMessages()
+            time.sleep(0.05)
+            left_state = safe(lambda: m.State, 0)
     if left_state != 0:  # still in run mode: the next run of any model would stall
         res["errors"].append({"level": "error",
                               "message": f"model still in run mode after End() (State {left_state})"})
     if outputs:
-        r = (resultsmod.read(model_path, t0, per_replication, text_only=legacy) if model_path
-             else {"source": None, "statistics": {}, "note": "the model has no saved path, so no report was read"})
+        if timed_out:
+            r = {"source": None, "statistics": {}, "note": "the batch timed out before a complete report could be read"}
+        elif model_path:
+            r = resultsmod.read(model_path, t0, per_replication, text_only=legacy)
+        else:
+            r = {"source": None, "statistics": {}, "note": "the model has no saved path, so no report was read"}
         res["results_source"] = r["source"]
         res["statistics"] = r["statistics"]
         if r.get("note"):
@@ -1202,14 +1237,16 @@ def _run_batch_locked(m, ended_first, show, outputs, per_replication, legacy):
     return res
 
 
-def _apply_in_memory(m, changes, report):
-    """changes: {module: {operand: value}}. Returns the previous values, to restore after the run."""
-    if changes and not isinstance(changes, dict):
+def _apply_in_memory(m, changes, report, old):
+    """先读回全部原值，再临时修改参数。以 COM 对象保存原值，改名后也能恢复。"""
+    if changes is None:
+        return
+    if not isinstance(changes, dict):
         report["errors"].append({"level": "error",
                                  "message": f"changes must be {{module: {{operand: value}}}}, not {type(changes).__name__}"})
-        return {}
+        return
     byname = modules_by_name(m)
-    old = {}
+    pending = []
     for module, data in (changes or {}).items():
         mod = byname.get(module)
         if mod is None:
@@ -1219,20 +1256,35 @@ def _apply_in_memory(m, changes, report):
             report["errors"].append({"level": "error",
                                      "message": f"set: give at least one operand for {module!r}, as {{operand: value}}"})
             continue
-        for k, v in data.items():
-            old[(module, k)] = getdata(mod, k)
-        apply_data(mod, [(k, str(v)) for k, v in data.items()], report, module)
-    return old
+        values = [(key, getdata(mod, key)) for key in data]
+        for key, value in values:
+            if value is None:
+                report["errors"].append(f"{module}: cannot read the original value of {key!r}")
+        pending.append((mod, module, values, [(key, str(value)) for key, value in data.items()]))
+    if report["errors"]:
+        return
+    for mod, module, values, items in pending:
+        old.extend((mod, module, key, value) for key, value in values)
+        apply_data(mod, items, report, module)
+        if report["errors"]:
+            return
 
 
-def _restore(m, old):
-    byname = modules_by_name(m)
-    for (module, k), v in old.items():
-        if v is not None:
-            safe(lambda: setdata(byname[module], k, v))
+def _restore(old, report):
+    for mod, module, key, previous in reversed(old):
+        if getdata(mod, key) == previous:
+            continue
+        try:
+            setdata(mod, key, previous)
+        except pythoncom.com_error:
+            report["errors"].append(f"{module}: could not restore {key!r} after batch execution")
+        else:
+            if getdata(mod, key) != previous:
+                report["errors"].append(f"{module}: restored value of {key!r} does not match the original")
 
 
-def run(a, model, reps=None, setup_fields=None, changes=None, show=None, outputs=True, per_replication=False):
+def run(a, model, reps=None, setup_fields=None, changes=None, show=None, outputs=True, per_replication=False, *,
+        timeout=None):
     """Run a model in batch mode and return the across-replication results.
     setup_fields: run setup to use for this run ({"replications", "replication_length", ...}).
     changes: {module: {operand: value}} applied in memory for this run only and restored afterwards (no save).
@@ -1244,19 +1296,26 @@ def run(a, model, reps=None, setup_fields=None, changes=None, show=None, outputs
         if type(reps) is not int or reps < 1:
             raise ArenaError("replications must be a positive integer")
         setup_fields = dict(setup_fields or {}, replications=reps)
+    if timeout is not None:
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise ArenaError("batch timeout must be positive and finite")
+        if com_major_version(a.Version) != ARENA_14:
+            raise ArenaError("configurable batch timeout currently supports Arena 14")
+    ended_first = end_other_runs(a)
     m = open_model(a, model)
     report = {"errors": [], "warnings": []}
     old_setup = run_setup_raw(m)
-    old = {}
+    old = []
     try:
         apply_run_setup(m, setup_fields, report)
         if not report["errors"]:
-            old = _apply_in_memory(m, changes, report)
+            _apply_in_memory(m, changes, report, old)
         # 无效参数不启动求解，避免生成一份采用了部分新参数的报表。
-        res = {"ok": False, "errors": []} if report["errors"] else _run_once(a, m, show, outputs, per_replication)
+        res = ({"ok": False, "errors": []} if report["errors"]
+               else _run_once(a, m, show, outputs, per_replication, ended_first=ended_first, timeout=timeout))
     finally:
         if old:
-            _restore(m, old)
+            _restore(old, report)
         if setup_fields:  # put back the exact COM values the model had before this run
             for key in setup_fields:
                 value = old_setup.get(key)
@@ -1268,7 +1327,7 @@ def run(a, model, reps=None, setup_fields=None, changes=None, show=None, outputs
     return {"model": m.FullName, **({"warnings": report["warnings"]} if report["warnings"] else {}), **res}
 
 
-def scenarios(a, model, cases, reps=None, setup_fields=None, show=None, measures=None):
+def scenarios(a, model, cases, reps=None, setup_fields=None, show=None, measures=None, *, timeout=None):
     """Run several scenarios in one Arena session without saving: each case is {"name", "changes": {module:
     {operand: value}}, "reps", "run_setup"}. Returns one result per case; measures limits outputs to those
     statistics (substring match, case-insensitive)."""
@@ -1285,7 +1344,7 @@ def scenarios(a, model, cases, reps=None, setup_fields=None, show=None, measures
     for c in cases:
         r = run(a, model, reps=c.get("reps", reps),
                 setup_fields={**(setup_fields or {}), **(c.get("run_setup") or {})},
-                changes=c.get("changes"), show=c.get("show", show))
+                changes=c.get("changes"), show=c.get("show", show), timeout=timeout)
         if measures:
             r["statistics"] = {k: v for k, v in r.get("statistics", {}).items()
                                if any(q.lower() in k.lower() for q in measures)}

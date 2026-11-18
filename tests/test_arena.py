@@ -14,6 +14,11 @@ from arena_agent.snapshot import _view_bounds, capture_animation_frame, snapshot
 pytestmark = pytest.mark.arena
 
 
+def close_example(model):
+    # pytest 的 DOE 是一次性副本，允许显式保存后关闭，防止测试之间留下文件锁。
+    worker.call(core.close, [model], save_changes=True)
+
+
 def build_example(name, tmp_path):
     spec = json.load(open(os.path.join(paths.examples_dir(), name), encoding="utf-8"))
     spec["save_as"] = str(tmp_path / spec["save_as"])
@@ -30,7 +35,7 @@ def test_clinic_builds_runs_and_matches_theory(tmp_path):
     # arrival rate 1/5 per minute, mean exam 12 minutes, 3 doctors: utilization 0.8
     assert abs(util["average"] - 0.8) < 2 * util["half_width"] + 0.05
     assert {"Examination.Queue.Waiting Time", "Examination.Queue.WaitingTime"} & stats.keys()
-    worker.call(core.close, [model])
+    close_example(model)
 
 
 def test_validate_runs_native_model_without_saving_it(tmp_path):
@@ -52,7 +57,7 @@ def test_validate_runs_native_model_without_saving_it(tmp_path):
         assert result["run"]["statistics_count"] > 0
         assert (tmp_path / "clinic.doe").read_bytes() == saved
     finally:
-        worker.call(core.close, [model])
+        close_example(model)
 
 
 def test_export_restores_the_editor_view_and_captures_a_paused_frame(tmp_path):
@@ -94,6 +99,9 @@ def test_export_restores_the_editor_view_and_captures_a_paused_frame(tmp_path):
                 while m.State == 13 and time.monotonic() < deadline:
                     time.sleep(0.05)
                 assert m.State == 16 and m.SIMAN.RunCurrentTime == pytest.approx(4)
+                with pytest.raises(core.ArenaError, match="is active"):
+                    core.run(app, model)
+                assert m.State == 16 and m.SIMAN.RunCurrentTime == pytest.approx(4)
                 old_bounds = _view_bounds(v)
                 live = snapshot(app, model, str(tmp_path / "paused.png"))
                 assert live["tiles"] == 1
@@ -111,7 +119,42 @@ def test_export_restores_the_editor_view_and_captures_a_paused_frame(tmp_path):
     try:
         worker.call(capture)
     finally:
-        worker.call(core.close, [model])
+        close_example(model)
+
+
+def test_batch_restores_native_rename_and_can_run_again_after_timeout(tmp_path):
+    model, built = build_example("bank.json", tmp_path)
+    assert built["ok"], built
+    original = Path(model).read_bytes()
+    try:
+        def exercise(app):
+            m = core.open_model(app, model)
+            before = core.run_setup_raw(m)
+            rename = {"Customers Leave": {"Name": "Temporary Departure"}}
+            bad = core.run(app, model, changes={**rename, "Missing": {"Capacity": "3"}})
+            assert not bad["ok"] and "Missing" in bad["errors"][0]["message"]
+            assert "Customers Leave" in core.modules_by_name(m)
+            if core.com_major_version(app.Version) == 14:
+                timeout = core.run(app, model, setup_fields={"replication_length": "5000000"},
+                                   changes=rename, timeout=0.02)
+                assert timeout["timed_out"] and not timeout["ok"], timeout
+                assert not timeout["statistics"] and timeout["results_source"] is None
+                assert m.State == 0 and core.run_setup_raw(m) == before
+                assert "Customers Leave" in core.modules_by_name(m)
+            replay = core.run(app, model, reps=2, changes=rename)
+            assert replay["ok"] and replay["replications"] == 2, replay
+            assert "Customers Leave" in core.modules_by_name(m)
+            assert m.State == 0 and core.run_setup_raw(m) == before
+            assert Path(model).read_bytes() == original
+            # Arena 将回退后的文档标记为已修改，默认关闭须保留它并保持磁盘内容。
+            assert not m.Saved
+            close = core.close(app, [model])
+            assert not close["ok"] and not close["closed"] and "unsaved changes" in close["failed"][0]["error"]
+            assert Path(model).read_bytes() == original
+
+        worker.call(exercise)
+    finally:
+        close_example(model)
 
 
 def test_bank_scenarios_more_tellers_wait_less(tmp_path):
@@ -139,7 +182,7 @@ def test_bank_scenarios_more_tellers_wait_less(tmp_path):
     assert teller["ops"]["Capacity"] == "2"
     assert worker.call(report_settings, model) == original_report_settings
     assert (tmp_path / "bank.doe").read_bytes() == saved_model
-    worker.call(core.close, [model])
+    close_example(model)
 
 
 def report_settings(app, model):
@@ -157,7 +200,7 @@ def test_overlap_is_reported_at_native_module_bounds(tmp_path):
     ]}
     res = worker.call(core.build, spec)
     assert "layout: 'Arrivals' overlaps 'Departures'" in res["warnings"]
-    worker.call(core.close, [spec["save_as"]])
+    close_example(spec["save_as"])
 
 
 def test_check_maps_error_to_module(tmp_path):
@@ -171,7 +214,7 @@ def test_check_maps_error_to_module(tmp_path):
     res = worker.call(core.build, spec)
     assert not res["ok"]
     assert any("NoSuchVar" in (e.get("message", "") + " ".join(e.get("code", []))) for e in res["check_errors"])
-    worker.call(core.close, [spec["save_as"]])
+    close_example(spec["save_as"])
 
 
 def test_reserved_word_refused(tmp_path):

@@ -150,13 +150,14 @@ def check_model(model: str) -> dict:
 @mcp.tool()
 def run_model(model: str, replications: int | None = None, run_setup: dict[str, Any] | None = None,
               changes: dict[str, dict[str, Any]] | None = None, show: list[str] | None = None,
-              measures: list[str] | None = None, per_replication: bool = False) -> dict:
+              measures: list[str] | None = None, per_replication: bool = False, timeout: float | None = None) -> dict:
     """Run the model in batch mode and return every statistic across replications: average, 95% half_width, min,
     max over replications and n. Keys look like "Process.Queue.Waiting Time", "Resource.Instantaneous Utilization",
     "Entity.Total Time", "Entity.WIP", output names. run_setup and changes ({module: {operand: value}}) apply to this
     run only and are restored afterwards, without saving. show evaluates Arena expressions at the end of the last
-    replication. measures keeps only statistics whose names contain one of these strings."""
-    res = _guard(core.run, model, replications, run_setup, changes, show, True, per_replication)
+    replication. measures keeps only statistics whose names contain one of these strings.
+    timeout sets the Arena 14 batch polling limit in seconds (default 300)."""
+    res = _guard(core.run, model, replications, run_setup, changes, show, True, per_replication, timeout=timeout)
     if measures and "statistics" in res:
         res["statistics"] = {k: v for k, v in res["statistics"].items()
                              if any(q.lower() in k.lower() for q in measures)}
@@ -166,12 +167,13 @@ def run_model(model: str, replications: int | None = None, run_setup: dict[str, 
 @mcp.tool()
 def run_scenarios(model: str, scenarios: list[dict[str, Any]], replications: int | None = None,
                   run_setup: dict[str, Any] | None = None, measures: list[str] | None = None,
-                  show: list[str] | None = None) -> dict:
+                  show: list[str] | None = None, timeout: float | None = None) -> dict:
     """Run several what-if scenarios in one Arena session without saving. Each scenario is {"name", "changes":
     {module: {operand: value}}, "replications", "run_setup"}; e.g. [{"name": "3 doctors", "changes": {"Doctor":
     {"Capacity": "3"}}}, {"name": "4 doctors", "changes": {"Doctor": {"Capacity": "4"}}}]. Use the same number of
-    replications in every scenario you compare. measures keeps only statistics whose names contain these strings."""
-    return _guard(core.scenarios, model, scenarios, replications, run_setup, show, measures)
+    replications in every scenario you compare. measures keeps only statistics whose names contain these strings.
+    timeout sets the Arena 14 polling limit in seconds for each scenario."""
+    return _guard(core.scenarios, model, scenarios, replications, run_setup, show, measures, timeout=timeout)
 
 
 @mcp.tool()
@@ -239,18 +241,20 @@ def capture_animation_frames(model: str, out_dir: str, view_name: str, simulatio
 
 @mcp.tool()
 def validate_model(model: str, replications: int = 1, png_path: str | None = None,
-                   view_name: str | None = None, pixels_per_unit: float | None = None) -> dict:
+                   view_name: str | None = None, pixels_per_unit: float | None = None,
+                   timeout: float | None = None) -> dict:
     """Check native compilation, layout warnings, batch results, and optionally export a PNG. Verify the DOE file
-    stays unchanged. Arena must be visible for PNG export. Native reports are written next to the model."""
+    stays unchanged. Arena must be visible for PNG export. Native reports are written next to the model.
+    timeout sets the Arena 14 polling limit in seconds for the batch step."""
     from .validation import validate
-    return _guard(validate, model, replications, png_path, view_name, pixels_per_unit)
+    return _guard(validate, model, replications, png_path, view_name, pixels_per_unit, timeout=timeout)
 
 
 @mcp.tool()
-def close_models(models: list[str] | None = None) -> dict:
-    """Close models without saving (all open models when none are given). Close a model before deleting or
-    replacing its files; Arena keeps them locked while the model is open."""
-    return _guard(core.close, models, retry=False)
+def close_models(models: list[str] | None = None, save_changes: bool = False) -> dict:
+    """Close idle, saved models (all open models when none are given). With save_changes=true, explicitly save
+    pending changes to an already named model before closing. Active runs always stay open."""
+    return _guard(core.close, models, retry=False, save_changes=save_changes)
 
 
 def main():

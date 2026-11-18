@@ -21,15 +21,15 @@ Exit codes: 0 success, 1 the result reports an error or ok: false, 2 a bad argum
   arena-agent delete model.doe Module [Module ...]
   arena-agent check  model.doe
   arena-agent run    model.doe [--reps N] [--set Module:Operand=Value ...] [--show EXPR ...] [--measures S ...]
-                                [--per-rep]
-  arena-agent scenarios model.doe cases.json [--reps N] [--measures S ...]
+                                [--per-rep] [--timeout SECONDS]
+  arena-agent scenarios model.doe cases.json [--reps N] [--measures S ...] [--timeout SECONDS]
   arena-agent results model.doe [--per-rep] [--all]   # statistics of the last run (no new run)
   arena-agent views model.doe                   # list named views
   arena-agent screenshot model.doe out.png [--view NAME | --region X0 Y0 X1 Y1] [--ppu P] [--tiles N]
   arena-agent animation-frame model.doe out.png --view NAME --time T [--speed S] [--timeout SECONDS]
   arena-agent animation-frames model.doe out_dir --view NAME --time T [T ...] [--speed S] [--prefix P]
-  arena-agent validate model.doe [--reps N] [--png out.png] [--view NAME] [--ppu P]
-  arena-agent close  [model.doe ...]
+  arena-agent validate model.doe [--reps N] [--png out.png] [--view NAME] [--ppu P] [--timeout SECONDS]
+  arena-agent close  [model.doe ...] [--save]
 """
 import json
 import sys
@@ -51,6 +51,15 @@ def opt_list(args, flag):
             break
         vals.append(x)
     return vals
+
+
+def batch_timeout(args):
+    if "--timeout" not in args:
+        return None
+    i = args.index("--timeout") + 1
+    if i == len(args) or args[i].startswith("--") or args.count("--timeout") != 1:
+        raise ValueError("--timeout needs one value in seconds")
+    return float(args[i])
 
 
 # How many values each option takes, so the command's own arguments can be found wherever the options sit.
@@ -249,7 +258,7 @@ def dispatch(cmd, args, pos):
     elif cmd == "run":
         reps = opt_list(args, "--reps")
         res = com(core.run, pos[0], int(reps[0]) if reps else None, None, parse_changes(opt_list(args, "--set")),
-                  opt_list(args, "--show"), True, "--per-rep" in args)
+                  opt_list(args, "--show"), True, "--per-rep" in args, timeout=batch_timeout(args))
         ms = opt_list(args, "--measures")
         if ms and "statistics" in res:
             res["statistics"] = {k: v for k, v in res["statistics"].items() if any(q.lower() in k.lower() for q in ms)}
@@ -258,7 +267,7 @@ def dispatch(cmd, args, pos):
         with open(pos[1], encoding="utf-8") as f:
             cases = json.load(f)
         res = com(core.scenarios, pos[0], cases, int(reps[0]) if reps else None, None, None,
-                  opt_list(args, "--measures") or None)
+                  opt_list(args, "--measures") or None, timeout=batch_timeout(args))
     elif cmd == "views":
         res = com(core.list_named_views, pos[0])
     elif cmd == "screenshot":
@@ -325,11 +334,12 @@ def dispatch(cmd, args, pos):
         except ValueError as e:
             out({"error": str(e)})
             return 2
-        res = com(validate, pos[0], replications, png[0] if png else None, view[0] if view else None, pixels_per_unit)
+        res = com(validate, pos[0], replications, png[0] if png else None, view[0] if view else None, pixels_per_unit,
+                  timeout=batch_timeout(args))
         out(res)
         return 0 if res.get("ok") else 1
     elif cmd == "close":
-        res = com(core.close, pos or None)
+        res = com(core.close, pos or None, save_changes="--save" in args)
     else:
         print(__doc__)
         return 2
