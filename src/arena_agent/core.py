@@ -718,7 +718,7 @@ def build(a, spec):
     # refuse SIMAN reserved words before touching any model (they compile with a warning, then the run stops at 0)
     names = set(declared.get("attributes") or []) | set(declared.get("variables") or [])
     for ms in (spec.get("modules") or []) + [dict(u, type=t) for u in (spec.get("updates") or [])
-                                              for t in ("Assign", "ReadWrite")]:
+                                              if isinstance(u, dict) for t in ("Assign", "ReadWrite")]:
         at, va = used_names(expand(ms), ms.get("type", ""))[:2]
         names |= at | va
     clash = reserved_clashes(names, a)
@@ -746,6 +746,9 @@ def build(a, spec):
     major = com_major_version(safe(lambda: a.Version))
     existing = modules_by_name(m)
     for u in spec.get("updates") or []:
+        if not isinstance(u, dict):
+            report["errors"].append(f"update: each update needs an object with name and data; got {u!r}")
+            continue
         mod = existing.get(u.get("name"))
         if mod is None:
             report["errors"].append(f"update: no module named {u.get('name')!r}")
@@ -841,6 +844,8 @@ def build(a, spec):
             existing[name] = mod
         collect(items, module_type)
     for u in spec.get("updates") or []:
+        if not isinstance(u, dict):
+            continue  # reported when the update was applied
         try:
             collect(expand(u), kind(existing[u.get("name")]) if u.get("name") in existing else "")
         except ArenaError:
