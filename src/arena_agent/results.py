@@ -154,7 +154,8 @@ def parse_out(txt):
         mm = re.match(r"^(\S[^\n]*?)\s{2,}(\S.*)$", line)
         if mm and cols:
             vals = mm.group(2).split()
-            if len(vals) == len(cols) and all(re.fullmatch(NUM, v) for v in vals):
+            # a counter's Limit column prints "Infinite" when it has none
+            if len(vals) == len(cols) and all(re.fullmatch(NUM, v) or v == "Infinite" for v in vals):
                 res[mm.group(1).strip()] = {"section": section, **{c: _num(v) for c, v in zip(cols, vals)}}
     return res
 
