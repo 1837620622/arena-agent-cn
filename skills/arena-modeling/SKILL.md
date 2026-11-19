@@ -1,38 +1,33 @@
 ---
 name: arena-modeling
-description: 在 Windows 上使用 Rockwell Arena 14 或 16 构建、修改和验收可编辑的离散事件仿真模型（.doe）。适用于队列、产线、诊所、交通和物流流程，以及原生批跑、方案对比、逐次重复统计、命名视图和 PNG 导图。
+description: 在 Windows 上用 Rockwell Arena 14 或 16 建模、修改和验收可编辑的离散事件仿真 DOE。用于排队、生产、交通和物流流程的原生检查、批跑、方案比较、报表读取、布局导图及 Arena 14 二维动画采帧。
 ---
 
 # Arena 离散事件仿真
 
-通过 [arena-agent-cn](https://github.com/1837620622/arena-agent-cn) 提供的 MCP 或 `arena-agent` 命令行操作本机 Arena。安装、更新和 CC Switch 同步方式见[仓库说明](https://github.com/1837620622/arena-agent-cn#安装和更新)。
+通过 `arena-agent-cn` 的 MCP 或 `arena-agent` CLI 操作本机 Arena。安装、版本和 CC Switch 更新方式见[仓库说明](https://github.com/1837620622/arena-agent-cn#安装和更新)。
 
 ## 接入与版本
 
-- 先调用 `arena_status`，或执行 `arena-agent info`，查看当前 COM 版本、许可状态和兼容模式。连接失败时运行 `arena-agent doctor`。
-- Arena 14 是当前的原生验收重点。批跑从本轮 SIMAN `.out` 取统计，离线回读按报告最后写入时间选择。Arena 16.x 批跑优先读取 SQLite `.db` 中同一轮运行的统计。不同版本的模板字段以 `module_operands` 和 `template_reference` 为准。
-- 如果许可状态未知且会影响建模规模，再确认使用的是学生版还是完整许可。遇到 `edition_limit_exceeded` 时准确指出限制并调整模型规模。
+- 建模、批跑、导图前先用 `arena_status` 或 `arena-agent info` 查看 COM 版本、兼容模式、许可和已打开的模型。连接失败可运行 `arena-agent doctor`。只读已有报表时直接用 `get_results` 或 `arena-agent results`，可离线完成。
+- Arena 14 批跑读取本轮 SIMAN `.out`，自动定点采帧在 Arena 14 路径上执行。Arena 16 批跑优先读取当轮 SQLite `.db`。只有本机实际运行过的版本和功能才能标为实机通过。模板字段以当前版本的 `module_operands`、`template_reference` 或现场读回为准。
+- 许可状态未知时，在模型规模或许可功能影响任务时再确认。遇到 `edition_limit_exceeded`，据实说明并在许可允许的范围内调整。CLI 或 MCP 的实际参数以 `--help` 或 `tools/list` 为准，技能和后端用同一修订版。
 
 ## 建模与验收
 
-1. 从题目、已有数据或需求中确认到达、服务、资源、路径、队列、终止条件和评价指标。运行长度、热身时间及时间单位应在 `run_setup` 中明确。可合理设定的缺项应在交付时说明假设。
-2. 已有模型先用 `inspect_model` 看模块、参数和连线。修改另存时用 `build_model` 的 `base` 与 `save_as`。新模型使用 [JSON 建模规格](references/build-spec.md)，字段值按 Arena 原生写法填写，如 `EXPO(5)`、`Minutes`。
-3. 主流程采用统一阅读方向，分支各占一行或独立区域。没给 `x`、`y` 的模块由连接图自动排布（一列一列向右，分支上下居中），用 `layout` 调 `dx`、`dy`、`columns`、`origin`；数据模块（资源、变量、队列、实体等）不进流程图，与自动声明的名称一起放在 `declare_at` 的声明网格里。标题用 `shapes` 的 `level`（`title`、`section`、`note`）统一字号层级，同图只用一种字体。用 `views` 按业务区域保存命名视图，导出时按名称取各分区。检查 `check_errors`、`dropped_connections`、`layout_warnings` 和操作中的读回异常。
-4. 用 `validate_model` 对已保存模型执行原生检查和批跑。指定 `png_path` 可以同时出图。验收结果包含模型文件是否变化、仿真结束时间、原生结果来源与统计项数量。需要明细时用 `run_model` 或 `get_results` 的 `per_replication`。验收会在模型旁生成原生报告文件。
-   Arena 14 批跑默认等待 300 秒。长任务可设置 `timeout`（命令行 `--timeout`）。遇到 `timed_out` 时查看当前仿真配置和运行状态，按本轮任务重新批跑。已有活动或暂停的模型时，批跑会保留当前运行状态。
-5. 用流量守恒、利用率数量级和定义的约束核对结果。比较方案时固定观察口径、热身和重复次数，再看差值与 95% 置信区间半宽。统计字段和典型用法见 [结果读取](references/results.md)。
-6. 大模型建模逻辑与动画分别保存命名视图。用 `list_named_views` 查看名称，用 `screenshot_model(view_name=...)` 分区导出。缺省优先沿用 Arena 当前缩放，受到图像尺寸和块数上限约束。需要精确比例时指定 `pixels_per_unit`，区域较大时可调高 `max_tiles` 或拆成多个分区。Arena 14 可用 `capture_animation_frame` 播放到指定仿真时刻并导出原生帧，`capture_animation_frames` 一次导出多个时刻。已有动画正在运行时，在 Arena 内显示整个目标区域并暂停，用 `screenshot_model` 抓取当前帧。动画从第零分钟播放，检查状态表达式、时钟、移动、排队和回程。
-7. 按最终观看大小逐张核对字体、单位、遮挡、边缘和拼接处。长表达式若被原生对话框截短，可在截图旁补充从 DOE 读回的完整字段。排版调整后复开、重新 Check 并复跑。交付按任务清单核对模型、图纸、截图和动画，成品包内只留约定文件。
+1. 从需求和资料中提取到达与服务过程、资源容量、路径、队列、终止条件和评价指标。明确时间单位、运行长度、热身及重复次数。缺项可合理设定时记录假设，只有无法可靠推断且会改变结果的输入才需要确认。用用户指令确定报告、模型、图纸、截图和动画的交付范围。
+2. 修改已有 DOE 前用 `inspect_model` 读回逻辑、参数与连线。保留原件时，用 `build_model` 的 `base` 和一个新 `save_as` 路径，复制模型所需的相对路径依赖。只有明确需要原位修改时才用 `base` 单独保存或提交单模块修改。运行报表会写到模型旁，需保留基准数据时在工作副本运行。
+3. 先布置主流程、分支、回路和数据声明区，再按业务保存命名视图。用 `layout` 调自动排布，用 `shapes.level` 统一标题层级。建模后核对模块操作数读回、`check_errors` 和 `dropped_connections`。布局检查发现的问题与导图发现的文字遮挡、裁切分别核对。
+4. 对保存后的 DOE 执行原生 Check 和批跑。`validate_model` 同时返回编译、运行、布局及可选 PNG 的结果。核对实际终止条件、重复次数、报告路径和关键指标，用流量守恒、利用率和约束做数量级检查。Arena 14 批跑可用 `timeout`，有其他活动或暂停运行时保留原运行并排查。批跑超时先确认运行状态，再决定是否重试。
+5. 图形交付按业务分区导出，并在实际观看尺寸逐张复看。动画从初始化开始检查时钟、队列、状态和实际移动，核对定点帧的 `simulation_time`。排版或模型有改动时，保存、复开并复跑相关检查。需要 ZIP 时，按交付清单打包并从解压路径复开验收。
 
-## 常用入口
+## 按任务查阅
 
-| 用途 | MCP | 命令行 |
+| 任务 | MCP / CLI | 参考 |
 | --- | --- | --- |
-| 查看运行环境 | `arena_status` | `arena-agent info` |
-| 建模与检查 | `build_model`、`check_model` | `arena-agent build`、`arena-agent check` |
-| 一次验收 | `validate_model` | `arena-agent validate` |
-| 仿真与结果 | `run_model`、`run_scenarios`、`get_results` | `arena-agent run`、`arena-agent scenarios`、`arena-agent results` |
-| 命名视图和截图 | `list_named_views`、`screenshot_model` | `arena-agent views`、`arena-agent screenshot` |
-| Arena 14 动画定点截图 | `capture_animation_frame`、`capture_animation_frames` | `arena-agent animation-frame`、`arena-agent animation-frames` |
+| 新建、另存或编辑模型 | `build_model`、`check_model` / `build`、`check` | [JSON 规格](references/build-spec.md)、[模块用法](references/modules.md) |
+| 批跑、统计、方案对比 | `run_model`、`run_scenarios`、`get_results` / `run`、`scenarios`、`results` | [统计与 CSV](references/results.md) |
+| 模型验收与图纸、动画交付 | `validate_model`、`list_named_views`、`screenshot_model`、`capture_animation_frames` / `validate`、`views`、`screenshot`、`animation-frames` | [原生排版、动画和交付](references/delivery.md) |
+| 启动、报表或原生操作异常 | `arena_status`、`arena_guide` / `info`、`doctor`、`guide` | [兼容性排查](references/gotchas.md)、[原生行为记录](references/discoveries.md) |
 
-建模时按需读取 [模块用法](references/modules.md)、[兼容性和故障排查](references/gotchas.md) 或[原生行为记录](references/discoveries.md)。导图直接捕获 Arena 绘图窗口，修改或替换 DOE 前先关闭已打开的相应模型。原生关闭可能触发保存，工具默认将未保存的文档留在 Arena 中，由用户决定是否保存。交付按用户指定的文件类型和范围组织。
+MCP 客户端可用 `arena_guide` 读取对应主题，如 `delivery` 或 `results`。仅关闭指定的任务模型时，给 `close_models` 传明确的 `models` 列表。原生关闭可能保存修改，默认保留含未保存改动的模型。

@@ -101,15 +101,12 @@ Background and evidence for each: `arena_guide("discoveries")`.
 - The first screenshot tile after opening some Arena 14 named views can jump to twice the requested world coordinates.
   `screenshot_model` checks that the displayed area covers the requested tile and retries before capturing. If the
   view still misses the tile, it reports the affected region.
-- Animation frames: `capture_animation_frame` plays and pauses at one simulation time (`BreakOnTime`);
-  `capture_animation_frames` repeats it for a list of increasing times. Times must be greater than zero — Arena
-  cannot break at time 0, so the first sample is a small positive time. Both end a stale run first, because a model
-  left in run mode blocks playback (12) and every frame of a series replays the run. Arena 14 cannot resume a paused
-  animation through COM, so every frame replays from zero — sample 5 to 8 key moments (start, first queue, steady
-  state, a status switch, the end) rather than a dense series. When a run cannot reach the time, lower `speed` so the
-  tool has time to set the breakpoint, and raise `timeout` for long runs. A visible jump between two frames is either
-  a model event (a resource turning busy, a batching release) or too coarse a time step: compare the printed clock in
-  both frames before blaming playback.
+- Animation frames: `capture_animation_frame` initializes the model (`StartOver`), registers a positive simulation
+  time (`BreakOnTime`), and starts playback (`Go(2)`). It checks the actual pause time before writing the PNG.
+  `capture_animation_frames` repeats the process for increasing times. End any existing run in Arena before using
+  automatic playback. Each frame replays from zero, so sample 5 to 8 key moments such as start, first queue, steady
+  state, status changes and the end. Pick a time within the replication and allow a longer `timeout` for slow runs.
+  Compare the clock and model events in adjacent frames when checking visible jumps.
 - The flowchart pane is normally `Afx:…:8:…`; where a build numbers it differently the exporter takes the largest
   visible `Afx:` child that is not the spreadsheet (`AfxFrameOrView…`).
 - A view can report mirrored bounds (`Left > Right`, `Top > Bottom`). Every export path compares and pastes in model

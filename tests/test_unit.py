@@ -1,4 +1,5 @@
 """Tests that need no Arena: spec expansion, name declaration, report parsing, statistics, edition, install config."""
+import csv
 import json
 import math
 import os
@@ -11,6 +12,28 @@ import pytest
 from arena_agent import cli, core, edition, install, paths, results, validation
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
+
+
+def test_temporary_settings_preserve_operation_error_and_restore_other_fields():
+    class Model:
+        BatchMode = False
+        _quiet = False
+
+        @property
+        def QuietMode(self):
+            return self._quiet
+
+        @QuietMode.setter
+        def QuietMode(self, value):
+            if not value:
+                raise ValueError("still in run mode")
+            self._quiet = value
+
+    model = Model()
+    with pytest.raises(core.ArenaError, match="breakpoint failed.*QuietMode"):
+        with core.temporary_settings(model, BatchMode=True, QuietMode=True):
+            raise core.ArenaError("breakpoint failed")
+    assert model.BatchMode is False
 
 
 def test_expand_rows_cases_resources():
@@ -172,6 +195,24 @@ def test_scenarios_reject_a_case_list_that_is_not_a_list():
         core.scenarios(None, "m.doe", ["one"])
     with pytest.raises(core.ArenaError, match="scenario run_setup"):
         core.scenarios(None, "m.doe", [{"name": "one"}, {"name": "two", "run_setup": ["replications"]}])
+    with pytest.raises(core.ArenaError, match="must agree"):
+        core.scenarios(None, "m.doe", [{"name": "one"}, {"reps": 5, "replications": 6}])
+
+
+def test_failed_scenarios_retain_previous_csv(tmp_path, monkeypatch):
+    path = tmp_path / "previous.csv"
+    path.write_bytes(b"existing")
+
+    def run(_app, _model, *, changes, **_options):
+        if changes:
+            return {"ok": True, "statistics": {"Done": {"value": 12}}}
+        return {"ok": False, "errors": ["failed to compile"]}
+
+    monkeypatch.setattr(core, "run", run)
+    result = core.scenarios(None, "m.doe", [{"changes": {"A": {}}}, {"name": "failed"}], csv_path=path)
+    assert not result["ok"] and "every scenario" in result["csv_error"]
+    assert result["scenarios"][0]["statistics"]["Done"]["value"] == 12
+    assert path.read_bytes() == b"existing"
 
 
 def test_plan_layout_survives_a_bad_layout_block():
@@ -378,6 +419,7 @@ def test_text_fallback_uses_each_printed_replication(tmp_path):
     wait = stats["Examination.Queue.WaitingTime"]
     assert wait["n"] == 10
     assert wait["replications"][:3] == [5.9228, 32.970, 5.2357]
+    assert wait["replication_ids"] == list(range(1, 11))
     assert stats["Doctor.ScheduledUtilization"]["average"] == pytest.approx(0.79324)
     assert len(stats["Doctor.ScheduledUtilization"]["replications"]) == 10
 
@@ -394,6 +436,9 @@ def test_latest_report_is_read_offline_and_database_is_preferred_during_standard
     assert latest["source"] == str(out)
     assert latest["statistics"]["Examination.Queue.WaitingTime"]["replications"][:3] == [5.9228, 32.970, 5.2357]
     assert results.read(model, since=900)["source"] == str(db)
+    assert core.last_results(db)["source"] == str(db)  # exact report selection even with a newer sibling
+    os.utime(out, (950, 950))
+    assert core.last_results(out)["source"] == str(out)
 
 
 def test_text_only_run_requires_current_siman_statistics(tmp_path):
@@ -431,6 +476,16 @@ def test_text_report_keeps_counters_with_infinite_limit():
     assert stats["Done"]["replications"] == [81]
 
 
+def test_text_replication_ids_do_not_fabricate_missing_or_summary_only_reps():
+    detail = ("Summary for Replication 1 of 3\nOUTPUTS\nIdentifier  Value\nDone  5\n"
+              "Summary for Replication 3 of 3\nOUTPUTS\nIdentifier  Value\nDone  7\n")
+    report = results.text_statistics(detail, per_replication=True)["Done"]
+    assert report["replication_ids"] == [1, 3] and report["replications"] == [5, 7]
+    summary = "Output Summary for 3 Replications\nOUTPUTS\nDone  4  1  2  7  3\n"
+    report = results.text_statistics(summary, per_replication=True)["Done"]
+    assert "replications" not in report and "replication_ids" not in report
+
+
 def test_read_db_matches_out_summary():
     res = results.read_db(os.path.join(DATA, "clinic.db"))
     out = results.parse_out(open(os.path.join(DATA, "clinic.out"), errors="replace").read())
@@ -440,6 +495,68 @@ def test_read_db_matches_out_summary():
     assert u["half_width"] == pytest.approx(out["Doctor.ScheduledUtilization"]["half_width"], abs=1e-4)
     assert res["Examination.Queue.Waiting Time"]["kind"] == "tally"
     assert res["Doctor.Instantaneous Utilization"]["kind"] == "time-persistent"
+
+
+def test_sqlite_preserves_native_replication_ids_and_duplicate_metric_labels(tmp_path):
+    db = tmp_path / "two.db"
+    with sqlite3.connect(db) as con:
+        con.execute('CREATE TABLE OutputStatsQuery ([Project RunDateTime], Replication, Name, Type, Source, RecordedValue)')
+        con.executemany(
+            "INSERT INTO OutputStatsQuery VALUES (?,?,?,?,?,?)",
+            [('run', 1, 'Done', 'Output', 'User', 3), ('run', 3, 'Done', 'Output', 'User', 9),
+             ('run', 2, 'Done', 'Output', 'Entity', 21)],
+        )
+    con.close()
+    rows = results.read_db(db, per_replication=True)
+    assert len(rows) == 2 and all(k.startswith("Done [") for k in rows)
+    by_source = {v["source"]: v for v in rows.values()}
+    assert by_source["User"]["replication_ids"] == [1, 3] and by_source["User"]["replications"] == [3, 9]
+    assert by_source["Entity"]["replication_ids"] == [2]
+
+
+def test_offline_results_csv_uses_real_reps_and_excel_encoding(tmp_path, capsys):
+    source = os.path.join(DATA, "clinic.out")
+    path = tmp_path / "逐次结果.csv"
+    assert cli.main(["results", source, "--per-rep", "--csv", str(path), "--measures", "NUMBEROUT"]) == 0
+    res = json.loads(capsys.readouterr().out)
+    assert res["ok"] and res["csv"]["mode"] == "per_replication"
+    assert path.read_bytes().startswith(b"\xef\xbb\xbf")
+    with path.open(encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == res["csv"]["rows"]
+    selected = [row for row in rows if row["statistic"] == "Patient.NumberOut"]
+    assert [int(r["replication"]) for r in selected] == list(range(1, 11))
+    assert [float(r["value"]) for r in selected] == res["statistics"]["Patient.NumberOut"]["replications"]
+    assert all(os.path.abspath(source) == r["report"] for r in rows)
+
+
+def test_csv_summary_preserves_text_and_keeps_previous_file_on_failure(tmp_path, monkeypatch):
+    path = tmp_path / "summary.csv"
+    report = {"name": "=字样", "results_source": "model.out",
+              "statistics": {"Done": {"section": "Counters", "count": 12, "limit": "Infinite"}}}
+    assert results.write_csv(path, [report])["rows"] == 1
+    previous = path.read_bytes()
+    with path.open(encoding="utf-8-sig", newline="") as stream:
+        row = next(csv.DictReader(stream))
+    assert row["scenario"] == "'=字样" and row["count"] == "12" and row["limit"] == "Infinite"
+
+    def locked(*_):
+        raise PermissionError("destination in use")
+    monkeypatch.setattr(results.os, "replace", locked)
+    with pytest.raises(PermissionError, match="destination in use"):
+        results.write_csv(path, [report])
+    assert path.read_bytes() == previous and list(tmp_path.iterdir()) == [path]
+
+
+def test_cli_missing_report_and_empty_csv_filter_return_failure(tmp_path, capsys):
+    target = tmp_path / "existing.csv"
+    target.write_bytes(b"previous")
+    assert cli.main(["results", str(tmp_path / "none.doe"), "--csv", str(target)]) == 1
+    assert not json.loads(capsys.readouterr().out)["ok"]
+    assert cli.main(["results", os.path.join(DATA, "clinic.out"), "--csv", str(target),
+                     "--measures", "NoStatisticWithThisName"]) == 1
+    assert "no matching" in json.loads(capsys.readouterr().out)["error"]
+    assert target.read_bytes() == b"previous"
 
 
 @pytest.mark.parametrize("with_run_index", [False, True])
@@ -572,6 +689,21 @@ def test_desktop_config(tmp_path, monkeypatch):
     assert cfg["mcpServers"]["arena-agent"]["args"] == ["mcp"] and cfg["mcpServers"]["x"] and cfg["other"] == 1
 
 
+def test_installer_leaves_managed_skill_link_and_shared_contents_alone(tmp_path, monkeypatch):
+    target = tmp_path / "arena-modeling"
+    target.mkdir()
+    retained = target / "SKILL.md"
+    retained.write_bytes(b"externally managed")
+    monkeypatch.setattr(install, "skill_target", lambda _: str(target))
+    monkeypatch.setattr(install, "_linked_skill", lambda path: path == str(target))
+    monkeypatch.setitem(install.MCP, "codex", lambda _command, remove=False: "mock config")
+    installed = install.install(["codex"])["installed"][0]
+    removed = install.uninstall(["codex"])["uninstalled"][0]
+    assert installed["skill"] == str(target) and installed["skill_managed_externally"]
+    assert removed["skill_managed_externally"] and "skill_removed" not in removed
+    assert retained.read_bytes() == b"externally managed"
+
+
 def test_cli_parsing():
     assert cli.parse_changes(["Doctor:Capacity=4", "Doctor:Name=D", "V:Initial Value=2"]) == {
         "Doctor": {"Capacity": "4", "Name": "D"}, "V": {"Initial Value": "2"}}
@@ -601,9 +733,15 @@ def test_cli_rejects_a_bad_set_expression_as_json(capsys):
 def test_cli_signals_a_failed_scenario(tmp_path, monkeypatch, capsys):
     cases = tmp_path / "cases.json"
     cases.write_text('[{"name":"bad"}]', encoding="utf-8")
-    monkeypatch.setattr(cli, "com", lambda *_, **__: {"scenarios": [{"name": "bad", "ok": False}]})
+    monkeypatch.setattr(cli, "com", lambda *_, **__: {"ok": False, "scenarios": [{"name": "bad", "ok": False}]})
     assert cli.main(["scenarios", "m.doe", str(cases)]) == 1
     assert not json.loads(capsys.readouterr().out)["scenarios"][0]["ok"]
+
+
+def test_cli_reports_failed_module_edit_even_when_tool_only_returns_errors(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "com", lambda *_, **__: {"errors": ["invalid operand"]})
+    assert cli.main(["set", "m.doe", "Process", "Unknown=1"]) == 1
+    assert json.loads(capsys.readouterr().out)["errors"] == ["invalid operand"]
 
 
 def test_run_setup_is_read_and_restored_with_raw_com_values():
@@ -613,10 +751,47 @@ def test_run_setup_is_read_and_restored_with_raw_com_values():
     raw = core.run_setup_raw(model)
     assert raw["replications"] == 5 and raw["replication_length_units"] == 2  # raw enum, not a translated name
     report = {"errors": []}
-    core.apply_run_setup(model, {"replications": 10, "replication_length_units": "hours"}, report)
+    previous = core.apply_run_setup(model, {"replications": 10, "replication_length_units": "hours"}, report)
     assert not report["errors"] and (model.NumberOfReplications, model.ReplicationLengthTimeUnits) == (10, 1)
-    model.NumberOfReplications, model.ReplicationLengthTimeUnits = raw["replications"], raw["replication_length_units"]
+    core.restore_run_setup(model, previous, report)
     assert (model.NumberOfReplications, model.ReplicationLengthTimeUnits) == (5, 2)
+
+
+def test_setup_rolls_back_after_a_property_setter_failure(monkeypatch):
+    class Model:
+        FullName = "m.doe"
+        NumberOfReplications = 5
+        length = 480
+
+        @property
+        def ReplicationLength(self):
+            return self.length
+
+        @ReplicationLength.setter
+        def ReplicationLength(self, value):
+            self.length = value
+            if value == "bad":
+                raise ValueError("invalid replication length")
+
+        def Save(self):
+            pytest.fail("invalid settings were saved")
+
+    m = Model()
+    monkeypatch.setattr(core, "open_model", lambda *_: m)
+    result = core.setup(None, "m.doe", {"replications": 8, "replication_length": "bad"})
+    assert not result["ok"] and not result["saved"]
+    assert m.NumberOfReplications == 5 and m.ReplicationLength == 480
+
+
+def test_build_rejects_a_hardlinked_save_as_alias(tmp_path, monkeypatch):
+    base, alias = tmp_path / "base.doe", tmp_path / "alias.doe"
+    base.write_bytes(b"model")
+    os.link(base, alias)
+    monkeypatch.setattr(core, "reserved_clashes", lambda *_: [])
+    monkeypatch.setattr(core, "open_model", lambda *_: pytest.fail("attempted to open base"))
+    result = core.build(None, {"base": str(base), "save_as": str(alias)})
+    assert result["model_changed"] is False and "base model itself" in result["error"]
+    assert alias.read_bytes() == base.read_bytes() == b"model"
 
 
 def test_invalid_run_setup_does_not_start_or_leave_partial_changes(monkeypatch):
@@ -660,7 +835,7 @@ def test_connect_reports_a_malformed_case_exit():
 
 def test_guide_topics_present():
     topics = paths.guide_topics()
-    for t in ("skill", "build-spec", "modules", "gotchas", "results", "discoveries"):
+    for t in ("skill", "build-spec", "modules", "gotchas", "results", "delivery", "discoveries"):
         assert t in topics and os.path.exists(topics[t]), t
 
 

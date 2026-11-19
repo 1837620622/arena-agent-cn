@@ -22,8 +22,8 @@ Exit codes: 0 success, 1 the result reports an error or ok: false, 2 a bad argum
   arena-agent check  model.doe
   arena-agent run    model.doe [--reps N] [--set Module:Operand=Value ...] [--show EXPR ...] [--measures S ...]
                                 [--per-rep] [--timeout SECONDS]
-  arena-agent scenarios model.doe cases.json [--reps N] [--measures S ...] [--timeout SECONDS]
-  arena-agent results model.doe [--per-rep] [--all]   # statistics of the last run (no new run)
+  arena-agent scenarios model.doe cases.json [--reps N] [--measures S ...] [--timeout SECONDS] [--per-rep] [--csv FILE]
+  arena-agent results model.doe|report.out|report.db [--per-rep] [--all] [--measures S ...] [--csv FILE]
   arena-agent views model.doe                   # list named views
   arena-agent screenshot model.doe out.png [--view NAME | --region X0 Y0 X1 Y1] [--ppu P] [--tiles N]
   arena-agent animation-frame model.doe out.png --view NAME --time T [--speed S] [--timeout SECONDS]
@@ -53,18 +53,23 @@ def opt_list(args, flag):
     return vals
 
 
-def batch_timeout(args):
-    if "--timeout" not in args:
+def one_option(args, flag):
+    if flag not in args:
         return None
-    i = args.index("--timeout") + 1
-    if i == len(args) or args[i].startswith("--") or args.count("--timeout") != 1:
-        raise ValueError("--timeout needs one value in seconds")
-    return float(args[i])
+    i = args.index(flag) + 1
+    if i == len(args) or args[i].startswith("--") or args.count(flag) != 1:
+        raise ValueError(f"{flag} needs one value")
+    return args[i]
+
+
+def batch_timeout(args):
+    value = one_option(args, "--timeout")
+    return float(value) if value is not None else None
 
 
 # How many values each option takes, so the command's own arguments can be found wherever the options sit.
 ONE_VALUE_FLAGS = {"--reps", "--png", "--view", "--ppu", "--tiles", "--speed", "--timeout", "--prefix",
-                   "--client", "--panel"}
+                   "--client", "--panel", "--csv"}
 LIST_VALUE_FLAGS = {"--show", "--measures", "--set", "--time"}
 FOUR_VALUE_FLAGS = {"--region"}
 
@@ -150,8 +155,8 @@ USAGE = {"defs": "arena-agent defs BasicProcess",
          "delete": "arena-agent delete model.doe Module [Module ...]",
          "check": "arena-agent check model.doe",
          "run": "arena-agent run model.doe [--reps N] [--set Module:Operand=Value ...]",
-         "scenarios": "arena-agent scenarios model.doe cases.json [--reps N]",
-         "results": "arena-agent results model.doe [--per-rep] [--all]",
+         "scenarios": "arena-agent scenarios model.doe cases.json [--reps N] [--per-rep] [--csv FILE]",
+         "results": "arena-agent results model.doe|report.out|report.db [--per-rep] [--all] [--csv FILE]",
          "views": "arena-agent views model.doe",
          "screenshot": "arena-agent screenshot model.doe out.png [--view NAME] [--ppu P] [--tiles N]",
          "animation-frame": "arena-agent animation-frame model.doe out.png --view NAME --time T",
@@ -222,9 +227,11 @@ def dispatch(cmd, args, pos):
             print(f.read())
         return 0
     if cmd == "results":
-        from . import core
-        out(core.last_results(pos[0], "--per-rep" in args, "--all" in args))
-        return 0
+        from .results import last_results
+        res = last_results(pos[0], "--per-rep" in args, "--all" in args,
+                           measures=opt_list(args, "--measures"), csv_path=one_option(args, "--csv"))
+        out(res)
+        return 0 if res["ok"] else 1
     from . import core
     if cmd == "info":
         res = com(core.info)
@@ -256,18 +263,19 @@ def dispatch(cmd, args, pos):
     elif cmd == "check":
         res = com(core.check, pos[0])
     elif cmd == "run":
+        from .results import filter_statistics
         reps = opt_list(args, "--reps")
         res = com(core.run, pos[0], int(reps[0]) if reps else None, None, parse_changes(opt_list(args, "--set")),
                   opt_list(args, "--show"), True, "--per-rep" in args, timeout=batch_timeout(args))
-        ms = opt_list(args, "--measures")
-        if ms and "statistics" in res:
-            res["statistics"] = {k: v for k, v in res["statistics"].items() if any(q.lower() in k.lower() for q in ms)}
+        if "statistics" in res:
+            res["statistics"] = filter_statistics(res["statistics"], opt_list(args, "--measures"))
     elif cmd == "scenarios":
         reps = opt_list(args, "--reps")
         with open(pos[1], encoding="utf-8") as f:
             cases = json.load(f)
         res = com(core.scenarios, pos[0], cases, int(reps[0]) if reps else None, None, None,
-                  opt_list(args, "--measures") or None, timeout=batch_timeout(args))
+                  opt_list(args, "--measures") or None, timeout=batch_timeout(args), per_replication="--per-rep" in args,
+                  csv_path=one_option(args, "--csv"))
     elif cmd == "views":
         res = com(core.list_named_views, pos[0])
     elif cmd == "screenshot":
@@ -348,7 +356,7 @@ def dispatch(cmd, args, pos):
         return 1
     if isinstance(res, dict) and res.get("ok") is False:  # a failed check, build or run: not a successful command
         return 1
-    if cmd == "scenarios" and any(case.get("ok") is False for case in res.get("scenarios", [])):
+    if isinstance(res, dict) and "ok" not in res and res.get("errors"):
         return 1
     return 0
 

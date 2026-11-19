@@ -10,6 +10,7 @@ import math
 import os
 import time
 
+import pythoncom
 import win32con
 import win32gui
 from PIL import Image, ImageGrab
@@ -21,6 +22,7 @@ VIEW_SETTINGS = {"SplitScreen": True, "SplitScreenPercent": 99, "Grid": False, "
                  "ShowGuides": False, "ShowPageBreaks": False}
 MOVING_STATES = {13, 14, 15}  # smStateRunning, smStateStepping, smStateFastForward
 RUN_FRAME_STATES = {8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 21}
+INITIALIZING_STATES = {0, 1, 2, 3, 5, 6}
 ES_CONTINUOUS = 0x80000000
 ES_DISPLAY_REQUIRED = 0x00000002
 MAX_PIXELS = 120_000_000  # one PNG: keeps a wrong pixels_per_unit from exhausting memory
@@ -226,12 +228,14 @@ def _export_view(view, top, child):
             if value is not None and safe(lambda: getattr(view, prop)) != value:
                 safe(lambda: setattr(view, prop, value))
         # 先恢复窗口和表格的尺寸，再还原原动画或逻辑视野。Arena 的边界读数为整数。
+        time.sleep(0.2)
         restore = _ordered(bounds)
         for _ in range(2):
             current = safe(lambda: _view_bounds(view))
             if current is None or all(abs(old - now) <= 2 for old, now in zip(bounds, current)):
                 break
             safe(lambda: view.ZoomRegion(*restore))
+            time.sleep(0.2)
 
 
 def snapshot(a, model, out_path, region=None, ppu=None, max_tiles=64, *, view_name=None):
@@ -382,6 +386,18 @@ def _capture_tiles(v, pane, region, ppu, max_tiles):
     return canvas, nx * ny, ppu
 
 
+def _wait_animation_state(model, pending_states, deadline):
+    state = model.State
+    while state in pending_states:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        pythoncom.PumpWaitingMessages()
+        time.sleep(min(0.02, remaining))
+        state = model.State
+    return state
+
+
 def capture_animation_frame(a, model, out_path, view_name, simulation_time, *, speed=0.5, timeout=120):
     """在 Arena 14 中播放至指定仿真时刻，导出二维动画原生帧。"""
     try:
@@ -414,23 +430,16 @@ def capture_animation_frame(a, model, out_path, view_name, simulation_time, *, s
     ):
         view.ZoomView(named)
         deadline = time.monotonic() + timeout
+        playback_error = None
         try:
-            m.Go(2)  # smGoReturn：Arena 保持正常播放，MCP 可以请求暂停时间。
-            state = m.State
-            while state in (0, 3, 4, 5, 6) and time.monotonic() < deadline:
-                time.sleep(0.02)
-                state = m.State
-            now = safe(lambda: m.SIMAN.RunCurrentTime)  # no SIMAN run state: the run never really started
-            if state != 13 or now is None or now >= simulation_time:
-                hint = ("; the run had already finished, so lower speed and retry" if state in (11, 12)
-                        else "; lower speed so the tool has time to pause, or pick a time the run reaches")
-                raise ArenaError(f"Arena could not set the animation breakpoint at {simulation_time:g} "
-                                 f"(state {state}){hint}")
+            # StartOver 只初始化。先在 t=0 登记断点，再启动播放，避免 COM 返回前越过目标时刻。
+            m.StartOver()
+            state = _wait_animation_state(m, INITIALIZING_STATES, deadline)
+            if state != 4 or time.monotonic() >= deadline:  # smStateInitialized
+                raise ArenaError(f"Arena could not initialize animation (state {state}). Check the model and timeout")
             m.BreakOnTime(simulation_time)
-            state = m.State
-            while state == 13 and time.monotonic() < deadline:
-                time.sleep(0.05)
-                state = m.State
+            m.Go(2)  # smGoReturn：播放时保持 COM 可响应。
+            state = _wait_animation_state(m, (INITIALIZING_STATES - {0}) | {4} | MOVING_STATES, deadline)
             current_time = safe(lambda: m.SIMAN.RunCurrentTime)
             if state != 16 or current_time is None or not math.isclose(current_time, simulation_time, rel_tol=1e-9,
                                                                       abs_tol=1e-9):
@@ -438,16 +447,27 @@ def capture_animation_frame(a, model, out_path, view_name, simulation_time, *, s
                                  f"expected {simulation_time:g}; check the model or increase the timeout")
             result = snapshot(a, model, out_path, view_name=view_name)
             return {**result, "simulation_time": current_time}
+        except Exception as exc:
+            playback_error = exc
+            raise
         finally:
-            if safe(lambda: m.State, 0):
-                safe(lambda: m.End())
+            try:
+                if m.State:
+                    m.End()
+                    state = _wait_animation_state(m, range(1, 22), time.monotonic() + 5)
+                    if state:
+                        raise ArenaError(f"model is still active (state {state})")
+            except (ArenaError, pythoncom.com_error) as exc:
+                message = f"Arena could not end temporary animation ({exc})"
+                if playback_error is not None:
+                    message = f"{playback_error}. {message}"
+                raise ArenaError(message) from exc
 
 
 def capture_animation_frames(a, model, out_dir, view_name, times, *, speed=0.5, timeout=120, prefix="frame"):
     """按递增的仿真时刻导出一组二维动画 PNG，用来逐帧核对运动、时钟和排队是否连贯。
 
-    每帧都从零重新播放一次（Arena 14 的暂停不能用 COM 续播），所以帧数保持在少量：
-    5 到 8 个关键时刻比一次抓几十帧更能看出运动方向和停顿。timeout 是每一帧的墙钟上限。
+    每帧都从零重新播放一次，适用于检查 5 到 8 个关键时刻。timeout 是单帧的等待时间上限。
     """
     times = list(times)
     try:

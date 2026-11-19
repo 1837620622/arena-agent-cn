@@ -1,4 +1,5 @@
 """End-to-end tests against a local Arena: pytest -m arena"""
+import csv
 import json
 import os
 from pathlib import Path
@@ -19,9 +20,10 @@ def close_example(model):
     worker.call(core.close, [model], save_changes=True)
 
 
-def build_example(name, tmp_path):
+def build_example(name, tmp_path, **overrides):
     spec = json.load(open(os.path.join(paths.examples_dir(), name), encoding="utf-8"))
     spec["save_as"] = str(tmp_path / spec["save_as"])
+    spec.update(overrides)
     return spec["save_as"], worker.call(core.build, spec)
 
 
@@ -39,18 +41,21 @@ def test_clinic_builds_runs_and_matches_theory(tmp_path):
 
 
 def test_validate_runs_native_model_without_saving_it(tmp_path):
-    model, built = build_example("clinic.json", tmp_path)
+    model, built = build_example("clinic.json", tmp_path, views=[
+        {"name": "Clinic detail", "region": [-500, -500, 7000, 2500]},
+        {"name": "By ID", "modules": ["arrive", "exam"], "margin": 600},
+    ])
     assert built["ok"], built
     try:
-        def create_view(app):
-            m = core.open_model(app, model)
-            m.NamedViews.Create("Clinic detail", "V", -500, -500, 7000, 2500)
-            m.Save()
-
-        worker.call(create_view)
         saved = (tmp_path / "clinic.doe").read_bytes()
         views = worker.call(core.list_named_views, model)["views"]
         assert views["Clinic detail"] == [-500, -500, 7000, 2500]
+        by_id = next(v["region"] for v in built["views"] if v["name"] == "By ID")
+        assert views["By ID"] == by_id
+        initial = worker.call(core.inspect, model)["run_setup"]
+        bad = worker.call(core.setup, model, {"replications": 2, "typo_field": 45})
+        assert not bad["ok"] and not bad["saved"] and bad["run_setup"] == initial
+        assert (tmp_path / "clinic.doe").read_bytes() == saved
         result = worker.call(validation.validate, model, 2)
         assert result["ok"] and result["model_file_unchanged"], result
         assert result["run"]["replications"] == 2 and result["run"]["end_time"] == 480
@@ -81,20 +86,21 @@ def test_export_restores_the_editor_view_and_captures_a_paused_frame(tmp_path):
         if core.com_major_version(app.Version) != 14:
             return
         before_animation = Path(model).read_bytes()
-        auto = capture_animation_frame(app, model, str(tmp_path / "timed.png"), "Detail", 4)
-        assert auto["simulation_time"] == pytest.approx(4) and auto["tiles"] == 1
+        auto = capture_animation_frame(app, model, str(tmp_path / "timed.png"), "Detail", 0.01)
+        assert auto["simulation_time"] == pytest.approx(0.01) and auto["tiles"] == 1
         assert m.State == 0 and _view_bounds(v) == pytest.approx(old_bounds, abs=2)
         assert Path(model).read_bytes() == before_animation
-        with core.temporary_settings(m, BatchMode=False, DisableReportDatabase=True, QuietMode=True, RunSpeed=0.1):
+        with core.temporary_settings(m, BatchMode=False, DisableReportDatabase=True, QuietMode=True, RunSpeed=0.01):
             try:
+                m.StartOver()
+                m.BreakOnTime(4)
                 m.Go(2)
                 deadline = time.monotonic() + 10
-                while m.State != 13 and time.monotonic() < deadline:
-                    time.sleep(0.05)
+                while m.State == 4 and time.monotonic() < deadline:
+                    time.sleep(0.02)
                 assert m.State == 13
                 with pytest.raises(core.ArenaError, match="pause"):
                     snapshot(app, model, str(tmp_path / "moving.png"))
-                m.BreakOnTime(4)
                 deadline = time.monotonic() + 10
                 while m.State == 13 and time.monotonic() < deadline:
                     time.sleep(0.05)
@@ -168,9 +174,17 @@ def test_bank_scenarios_more_tellers_wait_less(tmp_path):
         copyfile(Path(__file__).parent / "data" / "clinic.db", previous_db)
         future = time.time() + 3600
         os.utime(previous_db, (future, future))
-    out = worker.call(core.scenarios, model, [{"name": "2", "changes": {"Teller": {"Capacity": "2"}}},
-                                              {"name": "3", "changes": {"Teller": {"Capacity": "3"}}}], 10)
-    assert all(s["ok"] for s in out["scenarios"]), out
+    table = tmp_path / "柜员方案.csv"
+    out = worker.call(core.scenarios, model, [{"name": "两位柜员", "changes": {"Teller": {"Capacity": "2"}}},
+                                              {"name": "三位柜员", "replications": 10,
+                                               "changes": {"Teller": {"Capacity": "3"}}}], 10,
+                      measures=["Teller Service.Queue.Waiting"], per_replication=True, csv_path=table)
+    assert out["ok"] and all(s["ok"] for s in out["scenarios"]), out
+    assert out["csv"]["rows"] == 20
+    with table.open(encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert [r["scenario"] for r in rows] == ["两位柜员"] * 10 + ["三位柜员"] * 10
+    assert [int(r["replication"]) for r in rows] == list(range(1, 11)) * 2
     if original_report_settings is not None:
         assert all(s["results_source"].lower().endswith(".out") for s in out["scenarios"])
     w = [(s["statistics"].get("Teller Service.Queue.Waiting Time") or

@@ -82,13 +82,30 @@ class ArenaError(Exception):
 @contextmanager
 def temporary_settings(model, **settings):
     previous = {key: getattr(model, key) for key in settings}
+    operation_error = None
     try:
         for key, value in settings.items():
             setattr(model, key, value)
         yield
+    except Exception as exc:
+        operation_error = exc
+        raise
     finally:
-        for key, value in previous.items():
-            setattr(model, key, value)
+        errors = []
+        for key in reversed(previous):
+            value = previous[key]
+            try:
+                if getattr(model, key) != value:
+                    setattr(model, key, value)
+                if getattr(model, key) != value:
+                    errors.append(f"{key} does not match its original value")
+            except (pythoncom.com_error, AttributeError, TypeError, ValueError, OverflowError) as exc:
+                errors.append(f"{key} ({exc})")
+        if errors:
+            message = "Arena could not restore temporary settings: " + ", ".join(errors)
+            if operation_error is not None:
+                message = f"{operation_error}. {message}"
+            raise ArenaError(message)
 
 
 def arena_dir(a=None):
@@ -218,6 +235,15 @@ def open_model(a, path):
     if not os.path.exists(path):
         raise ArenaError(f"no such model file: {path}")
     return a.Models.Open(path)
+
+
+def same_model_file(a, b):
+    if os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b)):
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except FileNotFoundError:
+        return False
 
 
 def modules_by_name(m):
@@ -495,21 +521,18 @@ def inspect(a, model, full=False, out_path=None):
 
 def run_setup(m):
     units = {v: k for k, v in TIME_UNITS.items()}
-    g = lambda k: safe(lambda: getattr(m, k))  # noqa: E731
-    return {"replications": g("NumberOfReplications"), "replication_length": g("ReplicationLength"),
-            "replication_length_units": units.get(g("ReplicationLengthTimeUnits"), g("ReplicationLengthTimeUnits")),
-            "warm_up": g("WarmUpPeriod"), "warm_up_units": units.get(g("WarmUpPeriodTimeUnits"),
-                                                                     g("WarmUpPeriodTimeUnits")),
-            "base_time_units": units.get(g("BaseTimeUnits"), g("BaseTimeUnits")),
-            "hours_per_day": g("HoursPerDay"), "terminating_condition": g("TerminatingCondition")}
+    return {key: units.get(value, value) if key.endswith("units") else value
+            for key, value in run_setup_raw(m).items()}
 
 
 def apply_run_setup(m, setup, report):
     """setup: {"replications", "replication_length", "replication_length_units", "warm_up", "warm_up_units",
-    "base_time_units", "hours_per_day", "terminating_condition"}; units are days|hours|minutes|seconds."""
-    if setup and not isinstance(setup, dict):
+    "base_time_units", "hours_per_day", "terminating_condition"}; units are days|hours|minutes|seconds.
+    Return the original values on success, or report the error and undo writes already attempted."""
+    if setup is not None and not isinstance(setup, dict):
         report["errors"].append(f"run setup must be an object of field: value, not {type(setup).__name__}")
-        return
+        return {}
+    pending = {}
     for k, v in (setup or {}).items():
         if k not in SETUP_PROPS:
             report["errors"].append(f"run setup: unknown field {k!r} (valid: {sorted(SETUP_PROPS)})")
@@ -519,10 +542,42 @@ def apply_run_setup(m, setup, report):
                 report["errors"].append(f"run setup: {k}={v!r}; use one of {sorted(TIME_UNITS)}")
                 continue
             v = TIME_UNITS[str(v).lower()]
+        elif k == "replications":
+            valid = (type(v) is int and v > 0
+                     or isinstance(v, str) and re.fullmatch(r"\+?0*[1-9][0-9]*", v.strip()))
+            if not valid:
+                report["errors"].append("run setup: replications must be a positive integer")
+                continue
+        pending[k] = v
+    if report["errors"]:
+        return {}
+    try:
+        previous = {key: getattr(m, SETUP_PROPS[key]) for key in pending}
+    except (pythoncom.com_error, AttributeError, TypeError, ValueError, OverflowError) as e:
+        report["errors"].append(f"run setup: cannot read original values ({e})")
+        return {}
+    for k, v in pending.items():
         try:
             setattr(m, SETUP_PROPS[k], v)
-        except pythoncom.com_error as e:
+        except (pythoncom.com_error, AttributeError, TypeError, ValueError, OverflowError) as e:
             report["errors"].append(f"run setup: cannot set {k}={v!r} ({e})")
+            restore_run_setup(m, previous, report)
+            return {}
+    return previous
+
+
+def restore_run_setup(m, previous, report):
+    for key in reversed(previous):
+        prop = SETUP_PROPS[key]
+        value = previous[key]
+        try:
+            if getattr(m, prop) != value:
+                setattr(m, prop, value)
+        except (pythoncom.com_error, AttributeError, TypeError, ValueError, OverflowError) as e:
+            report["errors"].append(f"run setup: could not restore {key!r} ({e})")
+    for key, value in previous.items():
+        if safe(lambda: getattr(m, SETUP_PROPS[key]), object()) != value:
+            report["errors"].append(f"run setup: restored {key!r} does not match the original")
 
 
 def run_setup_raw(m):
@@ -665,10 +720,10 @@ def band_origin(box, dx, dy):
     return [0, 0]
 
 
-def create_views(m, views, report):
+def create_views(m, views, report, references=None):
     """Named views from a spec, so list_named_views reports the sections and screenshot_model exports each one:
     {"name": "MAIN", "modules": ["Arrive", "Exam"], "margin": 600} or {"name": "DETAIL", "region": [x0, y0, x1, y1]}."""
-    boxes = {}
+    boxes, by_serial = {}, {}
     for i in range(1, m.Modules.Count + 1):
         md = m.Modules.Item(i)
         if safe(lambda: md.Definition.DataModule, True):
@@ -676,6 +731,14 @@ def create_views(m, views, report):
         shape = safe(lambda: md.shape)
         if shape is not None:
             boxes.setdefault(getdata(md, "Name"), shape)
+            serial = safe(lambda: shape.SerialNumber)
+            if serial is not None:
+                by_serial[serial] = shape
+    # ID 与连线使用同一套引用。只接受当前仍在模型中的流程图模块。
+    for ref, module in (references or {}).items():
+        serial = safe(lambda: module.shape.SerialNumber)
+        if serial in by_serial:
+            boxes[ref] = by_serial[serial]
     made = []
     for v in views:
         name = safe(lambda: v.get("name"))
@@ -686,11 +749,16 @@ def create_views(m, views, report):
             region = v.get("region")
             if region is None:
                 margin = float(v.get("margin", 600))
-                wanted = list(v.get("modules") or [])
+                wanted = v.get("modules") or []
+                if not isinstance(wanted, (list, tuple)) or not all(isinstance(n, str) for n in wanted):
+                    raise ValueError("modules must be a list of module IDs or names")
+                if not math.isfinite(margin) or margin < 0:
+                    raise ValueError("margin must be nonnegative and finite")
                 missing = [n for n in wanted if n not in boxes]
                 if missing:
                     report["errors"].append(f"view {name}: no module named {', '.join(missing)}")
-                found = [boxes[n] for n in wanted if n in boxes]
+                    continue
+                found = [boxes[n] for n in wanted]
                 if not found:
                     report["errors"].append(f"view {name}: give region or names of existing modules")
                     continue
@@ -702,7 +770,7 @@ def create_views(m, views, report):
                 report["errors"].append(f"view {name}: region needs increasing bounds")
                 continue
             m.NamedViews.Create(name, "V", x0, y0, x1, y1)
-        except (pythoncom.com_error, AttributeError, TypeError, ValueError) as e:
+        except (pythoncom.com_error, AttributeError, TypeError, ValueError, OverflowError) as e:
             report["errors"].append(f"view {name}: {e}")
             continue
         made.append({"name": name, "region": [x0, y0, x1, y1]})
@@ -717,6 +785,8 @@ def build(a, spec):
                 spec = json.load(f)
         except (OSError, ValueError) as e:
             return {"error": f"cannot read the spec file {spec}: {type(e).__name__}: {e}", "model_changed": False}
+    if not isinstance(spec, dict):
+        return {"error": "build spec must be an object", "model_changed": False}
     report = {"errors": [], "warnings": [], "declared": []}
     declared = spec.get("declare") or {}
     for key in ("base", "save_as"):
@@ -733,8 +803,7 @@ def build(a, spec):
         return {"error": "SIMAN reserved words used as attribute/variable names; rename them", "names": clash,
                 "model_changed": False}
     if "base" in spec:
-        if "save_as" in spec and (os.path.abspath(spec["save_as"]).lower()
-                                  == os.path.abspath(spec["base"]).lower()):
+        if "save_as" in spec and same_model_file(spec["base"], spec["save_as"]):
             return {"error": "save_as is the base model itself; give a new path so the base file is never overwritten",
                     "model_changed": False}
         m = open_model(a, spec["base"])
@@ -845,7 +914,7 @@ def build(a, spec):
                 auto.append(f"Entity {stray!r} removed, unused (added with {name or ms.get('id')})")
             else:
                 auto.append(f"{kind(side)} {getdata(side, 'Name')!r} (added with {name or ms.get('id')})")
-        made[ms.get("id", name)] = mod
+        made[key] = mod
         n_added += 1
         if name:
             existing[name] = mod
@@ -881,7 +950,7 @@ def build(a, spec):
         delete_modules(m, spec["delete"], report)
     report["warnings"].extend(layout_notes + layout_warnings(m))
     if spec.get("views"):  # named views make each section readable in list_named_views / screenshot_model
-        report["views"] = create_views(m, spec["views"], report)
+        report["views"] = create_views(m, spec["views"], report, made)
     if spec.get("check", True):  # compile after deletes, so dropped connections and errors show up now, not later
         report["check_errors"], report["dropped_connections"] = check_model(m)
         report["ok"] = not report["errors"] and not report["dropped_connections"] and not any(
@@ -981,9 +1050,10 @@ def setup(a, model, run_setup_fields, save=True):
     m = open_model(a, model)
     report = {"errors": []}
     apply_run_setup(m, run_setup_fields, report)
-    if save:
+    saved = save and not report["errors"]
+    if saved:
         m.Save()
-    return {"model": m.FullName, "run_setup": run_setup(m), "saved": save, **report}
+    return {"model": m.FullName, "run_setup": run_setup(m), "ok": not report["errors"], "saved": saved, **report}
 
 
 # ---------------------------------------------------------------------------------------------------- check and run
@@ -1304,10 +1374,10 @@ def run(a, model, reps=None, setup_fields=None, changes=None, show=None, outputs
     ended_first = end_other_runs(a)
     m = open_model(a, model)
     report = {"errors": [], "warnings": []}
-    old_setup = run_setup_raw(m)
+    old_setup = {}
     old = []
     try:
-        apply_run_setup(m, setup_fields, report)
+        old_setup = apply_run_setup(m, setup_fields, report)
         if not report["errors"]:
             _apply_in_memory(m, changes, report, old)
         # 无效参数不启动求解，避免生成一份采用了部分新参数的报表。
@@ -1316,43 +1386,55 @@ def run(a, model, reps=None, setup_fields=None, changes=None, show=None, outputs
     finally:
         if old:
             _restore(old, report)
-        if setup_fields:  # put back the exact COM values the model had before this run
-            for key in setup_fields:
-                value = old_setup.get(key)
-                if key in SETUP_PROPS and value is not None:
-                    safe(lambda: setattr(m, SETUP_PROPS[key], value))
+        restore_run_setup(m, old_setup, report)
     res["errors"] = [{"level": "error", "message": e} if isinstance(e, str) else e for e in report["errors"]] + res[
         "errors"]
     res["ok"] = res["ok"] and not report["errors"]
     return {"model": m.FullName, **({"warnings": report["warnings"]} if report["warnings"] else {}), **res}
 
 
-def scenarios(a, model, cases, reps=None, setup_fields=None, show=None, measures=None, *, timeout=None):
+def scenarios(a, model, cases, reps=None, setup_fields=None, show=None, measures=None, *, timeout=None,
+              per_replication=False, csv_path=None):
     """Run several scenarios in one Arena session without saving: each case is {"name", "changes": {module:
     {operand: value}}, "reps", "run_setup"}. Returns one result per case; measures limits outputs to those
     statistics (substring match, case-insensitive)."""
     out = []
-    if not isinstance(cases, list):
-        raise ArenaError('cases must be a list of scenarios: [{"name": ..., "changes": {module: {operand: value}}}]')
+    if not isinstance(cases, list) or not cases:
+        raise ArenaError('cases must be a nonempty list of scenarios: [{"name": ..., "changes": {module: {operand: value}}}]')
+    if csv_path is not None:
+        csv_path = resultsmod.csv_destination(csv_path)
+    counts = []
     for c in cases:
         if not isinstance(c, dict):
             raise ArenaError(f"each scenario must be an object with name/changes; got {c!r}")
         if c.get("run_setup") is not None and not isinstance(c["run_setup"], dict):
             raise ArenaError("scenario run_setup must be an object of field: value")
+        if "reps" in c and "replications" in c and c["reps"] != c["replications"]:
+            raise ArenaError("scenario reps and replications must agree when both are supplied")
+        count = c.get("reps", c.get("replications", reps))
+        if count is not None and (type(count) is not int or count < 1):
+            raise ArenaError("scenario replications must be a positive integer")
+        counts.append(count)
     if setup_fields is not None and not isinstance(setup_fields, dict):
         raise ArenaError("run setup must be an object of field: value")
-    for c in cases:
-        r = run(a, model, reps=c.get("reps", reps),
+    for c, count in zip(cases, counts):
+        r = run(a, model, reps=count,
                 setup_fields={**(setup_fields or {}), **(c.get("run_setup") or {})},
-                changes=c.get("changes"), show=c.get("show", show), timeout=timeout)
-        if measures:
-            r["statistics"] = {k: v for k, v in r.get("statistics", {}).items()
-                               if any(q.lower() in k.lower() for q in measures)}
+                changes=c.get("changes"), show=c.get("show", show), timeout=timeout,
+                per_replication=per_replication)
+        if "statistics" in r:
+            r["statistics"] = resultsmod.filter_statistics(r["statistics"], measures)
         out.append({"name": c.get("name", f"case {len(out) + 1}"), **r})
-    return {"model": os.path.abspath(model), "scenarios": out}
+    result = {"model": os.path.abspath(model), "scenarios": out, "ok": all(case["ok"] for case in out)}
+    if csv_path is not None:
+        if not result["ok"]:
+            result["csv_error"] = "CSV export requires every scenario to complete successfully"
+        else:
+            try:
+                result["csv"] = resultsmod.write_csv(csv_path, out, per_replication)
+            except (OSError, ValueError) as e:
+                result.update(ok=False, csv_error=str(e))
+    return result
 
 
-def last_results(model, per_replication=False, include_empty=False):
-    """Results of the model's last run, from its report database or text report (no new run, no Arena needed)."""
-    path = os.path.abspath(model)
-    return {"model": path, **resultsmod.read(path, 0, per_replication, include_empty)}
+last_results = resultsmod.last_results

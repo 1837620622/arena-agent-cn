@@ -10,12 +10,16 @@ replication values, and n.
 Fallback (no .db, e.g. Arena 14): the SIMAN summary report <model>.out. Where there is no native aggregate,
 derive it from the printed replication values.
 """
+from collections import Counter
+import csv
+from itertools import chain
 import math
 import os
 from pathlib import Path
 import sqlite3
 import re
 import statistics
+import tempfile
 
 VIEWS = (("DiscreteTimeStatsQuery", "Average", "tally"), ("ContinuousTimeStatsQuery", "Average", "time-persistent"),
          ("CounterStatsQuery", "RecordedValue", "counter"), ("OutputStatsQuery", "RecordedValue", "output"))
@@ -78,19 +82,29 @@ def read_db(path, per_replication=False):
             known = [when for when, _, _ in reports if when is not None]
             latest = max(known) if known else None
 
-        res = {}
+        by_metric = {}
         for when, k, rows in reports:
             if when != latest:
                 continue
-            by = {}
             for _, rep, name, typ, src, val in rows:
-                key = name if k in ("output", "counter") else f"{name}.{typ}"  # outputs/counters have unique names
-                by.setdefault((key, src), {})[rep] = val
-            for (key, src), reps in by.items():
-                rec = {"kind": k, "source": src, **summarize([reps[r] for r in sorted(reps)])}
-                if per_replication:
-                    rec["replications"] = [reps[r] for r in sorted(reps)]
-                res[key] = rec
+                key = name if k in ("output", "counter") else f"{name}.{typ}"
+                by_metric.setdefault((key, k, typ, src), {})[rep] = val
+        occurrences = Counter(key for key, _, _, _ in by_metric)
+        res = {}
+        for (key, kind, typ, source), reps in by_metric.items():
+            label = key
+            if occurrences[key] > 1:
+                base = f"{key} [{kind}, {source}, {typ}]"
+                label, index = base, 2
+                while label in occurrences or label in res:
+                    label = f"{base} #{index}"
+                    index += 1
+            ids = sorted(reps)
+            values = [reps[i] for i in ids]
+            rec = {"kind": kind, "source": source, **summarize(values)}
+            if per_replication:
+                rec["replications"], rec["replication_ids"] = values, ids
+            res[label] = rec
         return res
     finally:
         con.close()
@@ -104,10 +118,13 @@ def drop_empty(res):
 
 
 def read(model_path, since=0, per_replication=False, include_empty=False, *, text_only=False):
-    base = os.path.splitext(model_path)[0]
+    model_path = os.fspath(model_path)
+    base, extension = os.path.splitext(model_path)
+    explicit_report = extension.lower() in (".db", ".out") and not text_only
+    suffixes = (extension.lower(),) if explicit_report else (".out",) if text_only else (".db", ".out")
     candidates = []
-    for suffix in ((".out",) if text_only else (".db", ".out")):
-        path = base + suffix
+    for suffix in suffixes:
+        path = model_path if explicit_report else base + suffix
         try:
             modified = os.stat(path).st_mtime
         except OSError:
@@ -146,13 +163,15 @@ def read(model_path, since=0, per_replication=False, include_empty=False, *, tex
 def report_license(model_path):
     """The license line Arena prints in the text report header, e.g. "STUDENT"; None if there is no report."""
     out = os.path.splitext(model_path)[0] + ".out"
-    if not os.path.exists(out):
+    try:
+        with open(out, errors="replace") as f:
+            for _ in range(5):
+                line = f.readline()
+                if "License:" in line:
+                    return line.split("License:", 1)[1].strip() or None
+    except OSError:
+        # 报表锁定时仍要交付本轮仿真状态，许可提示只是辅助信息。
         return None
-    with open(out, errors="replace") as f:
-        for _ in range(5):
-            line = f.readline()
-            if "License:" in line:
-                return line.split("License:", 1)[1].strip() or None
     return None
 
 
@@ -211,12 +230,20 @@ def parse_out(txt):
 
 def text_statistics(text, per_replication=False):
     result = parse_out(text)
-    body = text.split("Output Summary for", 1)[0]
-    blocks = re.split(r"^\s*Summary for Replication\s+\d+\s+of\s+\d+\s*$", body, flags=re.M)[1:]
-    if len(blocks) <= 1 and not per_replication:
+    body, has_summary, _ = text.partition("Output Summary for")
+    headers = list(re.finditer(r"^[ \t]*Summary for Replication[ \t]+(\d+)[ \t]+of[ \t]+\d+[ \t]*\r?$",
+                               body, flags=re.M))
+    if len(headers) <= 1 and not per_replication:
         return result
+    if headers:
+        ids = [int(header.group(1)) for header in headers]
+        ends = [header.start() for header in headers[1:]] + [len(body)]
+        replications = [parse_out(body[h.end():end]) for h, end in zip(headers, ends)]
+    elif has_summary:
+        return result
+    else:
+        ids, replications = [1], [result]
 
-    replications = [parse_out(block) for block in blocks] if blocks else [result]
     samples = {}
     for index, replication in enumerate(replications):
         for name, record in replication.items():
@@ -230,4 +257,93 @@ def text_statistics(text, per_replication=False):
             result[name] = {"section": section, **stats, "reps": stats["n"]}
         if per_replication:
             result[name]["replications"] = values
+            result[name]["replication_ids"] = ids
+    return result
+
+
+def filter_statistics(stats, measures):
+    if not measures:
+        return stats
+    needles = tuple(q.casefold() for q in measures)
+    return {k: v for k, v in stats.items() if any(q in k.casefold() for q in needles)}
+
+
+def csv_destination(path):
+    out = Path(path).absolute()
+    if out.suffix.lower() != ".csv" or out.is_dir():
+        raise ValueError("give a CSV file path ending in .csv")
+    return out
+
+
+SUMMARY_FIELDS = ("average", "half_width", "min", "max", "n", "value", "count", "observations", "limit")
+CONTEXT_FIELDS = ("scenario_index", "scenario", "statistic", "kind", "statistic_source", "report")
+
+
+def _csv_rows(reports, per_replication):
+    for index, report in enumerate(reports, 1):
+        for name, stat in report["statistics"].items():
+            context = {
+                "scenario_index": index if "name" in report else None,
+                "scenario": report.get("name"),
+                "statistic": name,
+                "kind": stat.get("kind", stat.get("section")),
+                "statistic_source": stat.get("source"),
+                "report": report.get("results_source", report.get("source")),
+            }
+            if per_replication:
+                ids = stat.get("replication_ids", [])
+                for rep, value in zip(ids, stat.get("replications", [])):
+                    yield {**context, "replication": rep, "value": value}
+            else:
+                row = {key: stat.get(key) for key in SUMMARY_FIELDS}
+                row["n"] = stat.get("n", stat.get("reps"))
+                row["min"] = stat.get("min", stat.get("minimum"))
+                row["max"] = stat.get("max", stat.get("maximum"))
+                yield {**context, **row}
+
+
+def _csv_cell(value):
+    # 统计名称和场景名称可能来自输入。按文字写出，防止电子表格把它们当作公式。
+    if isinstance(value, str) and (value.lstrip().startswith(("=", "+", "-", "@"))
+                                  or value.startswith(("\t", "\r", "\n"))):
+        return "'" + value
+    return value
+
+
+def write_csv(path, reports, per_replication=False):
+    """Write a summary or a long replication table, preserving an existing CSV until the replacement is complete."""
+    out = csv_destination(path)
+    rows = _csv_rows(reports, per_replication)
+    first = next(rows, None)
+    if first is None:
+        what = "replication values" if per_replication else "statistics"
+        raise ValueError(f"no matching {what} to export")
+    header = CONTEXT_FIELDS + (("replication", "value") if per_replication else SUMMARY_FIELDS)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    staged = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=out.parent, suffix=".tmp", delete=False,
+                                         newline="", encoding="utf-8-sig") as stream:
+            staged = Path(stream.name)
+            writer = csv.DictWriter(stream, fieldnames=header)
+            writer.writeheader()
+            for count, row in enumerate(chain((first,), rows), 1):
+                writer.writerow({k: _csv_cell(v) for k, v in row.items()})
+        os.replace(staged, out)
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
+    return {"path": str(out), "rows": count, "mode": "per_replication" if per_replication else "summary"}
+
+
+def last_results(model, per_replication=False, include_empty=False, *, measures=None, csv_path=None):
+    path = os.path.abspath(model)
+    result = {"model": path, **read(path, per_replication=per_replication, include_empty=include_empty)}
+    result["ok"] = result["source"] is not None
+    result["statistics"] = filter_statistics(result["statistics"], measures)
+    if csv_path is not None and result["ok"]:
+        try:
+            result["csv"] = write_csv(csv_path, [result], per_replication)
+        except (OSError, ValueError) as e:
+            result.update(ok=False, error=str(e))
     return result

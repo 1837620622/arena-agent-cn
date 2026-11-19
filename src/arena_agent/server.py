@@ -8,18 +8,17 @@ from typing import Any
 
 from mcp.server.mcpserver import Image, MCPServer
 
-from . import __version__, core, edition, paths, worker
+from . import __version__, core, edition, paths, results, worker
 
 INSTRUCTIONS = """\
-Tools to build, run and analyse Rockwell Arena simulation models on this Windows machine.
+在本机 Windows 上操作 Rockwell Arena，交付可编辑的 DOE 和用户需要的成果。
 
-Before the first model in a session: call arena_status (Arena version and edition; if edition.status is "unknown",
-ask the user whether they use the free Student edition or a full/lab license and record it with set_edition), then
-read the workflow with arena_guide (topic "skill"), unless your client already loaded the arena-modeling skill.
-Turning a problem statement into a model: ask for missing data, build from a JSON spec with build_model, fix every
-check error, run with enough replications, and report results with their 95% half-widths. Give the user what they
-asked for: numbers, the .doe model, a written summary, or any combination.
-Never overwrite a user's model: extend it with base + save_as. Paths are Windows paths on this machine."""
+客户端未加载 arena-modeling 时，通过 arena_guide 的 skill 主题读取流程。需要原生操作时先查 arena_status，
+用实际主版本和许可判断可用功能。仅回读报表时直接用 get_results。许可未知且影响本次任务时再确认。
+
+先用 inspect_model 读回已有模型。需要保留原件时用 build_model 的 base 和新的 save_as，并复制相对路径依赖。
+从原生 Check、实际运行和报表确认模型与结果。需要排版、图纸、动画或成品验收时读取 delivery 主题。
+以用户要求确定交付文件，说明已执行的检查和当前环境能验证的范围。文件参数是本机 Windows 路径。"""
 
 mcp = MCPServer("arena-agent", title="Arena simulation", version=__version__, instructions=INSTRUCTIONS)
 
@@ -36,7 +35,8 @@ def _guard(fn, *args, retry=False, **kwargs):
 @mcp.tool()
 def arena_status() -> dict:
     """Arena's version, install folder, edition (license type, whether it is size-limited) and open models. Starts
-    Arena if it is not running (allow up to a minute). Call this first."""
+    Arena if it is not running (allow up to a minute). Call before native operations. For offline reports,
+    call get_results directly."""
     return _guard(core.info, retry=True)
 
 
@@ -50,8 +50,8 @@ def set_edition(limited: bool | None) -> dict:
 
 @mcp.tool()
 def arena_guide(topic: str = "skill") -> dict:
-    """The arena-modeling guide: how to go from a problem statement to a verified model, the build-spec format,
-    module recipes and the Arena COM gotchas. topic "skill" is the overview; it lists the other topics."""
+    """Read the arena-modeling guide without opening Arena. Use "skill" for the overview, "build-spec" for the
+    JSON format, "results" for reports and statistics, and "delivery" for layout, animation and acceptance."""
     topics = paths.guide_topics()
     p = topics.get(topic)
     if not p or not os.path.exists(p):
@@ -100,10 +100,10 @@ def inspect_model(model: str, full: bool = False, out_path: str | None = None) -
 @mcp.tool()
 def build_model(spec: dict[str, Any] | None = None, spec_path: str | None = None) -> dict:
     """Build a new model, or extend an existing one, from a build spec (pass the spec object, or spec_path to a JSON
-    file). New model: "save_as" is required. Extending: "base" is opened and first saved as "save_as", so the base
-    file is never changed. The spec lists modules (panel, type, x, y, data, rows/cases/resources), connections
+    file). For a new model use "save_as". To preserve an existing model, pass "base" and a distinct "save_as".
+    Passing "base" alone edits it in place. The spec lists modules (panel, type, x, y, data, rows/cases/resources), connections
     (from, to, exit), updates to existing modules, run_setup, declare, delete. Modules without x/y are placed from the
-    connection graph (tune with "layout": dx, dy, columns, origin); "views" saves named views from module names or a
+    connection graph (tune with "layout": dx, dy, columns, origin); "views" saves named views from module IDs, names or a
     region; "shapes" adds titles with level title|section|note. Names used by Assign, ReadWrite, Process, Hold,
     Search and Create are declared automatically, in a grid beside the flow rather than stacked, and data modules
     listed without x/y go into that same grid. Compiles at the end: read
@@ -123,7 +123,8 @@ def build_model(spec: dict[str, Any] | None = None, spec_path: str | None = None
 def set_module(model: str, module: str, data: dict[str, Any], save: bool = True) -> dict:
     """Change operands of one module by name, e.g. data={"Capacity": "4"} on Resource "Doctor", then save. Values
     are strings as typed in Arena's dialogs; repeat rows are "Operand(i)". Reads every value back and reports
-    invalid choices. For several modules at once use build_model with base and updates (one open, one save)."""
+    invalid choices. For several modules at once use build_model with base and updates, plus save_as to preserve
+    the original model."""
     return _guard(core.set_data, model, module, data, save)
 
 
@@ -158,30 +159,34 @@ def run_model(model: str, replications: int | None = None, run_setup: dict[str, 
     replication. measures keeps only statistics whose names contain one of these strings.
     timeout sets the Arena 14 batch polling limit in seconds (default 300)."""
     res = _guard(core.run, model, replications, run_setup, changes, show, True, per_replication, timeout=timeout)
-    if measures and "statistics" in res:
-        res["statistics"] = {k: v for k, v in res["statistics"].items()
-                             if any(q.lower() in k.lower() for q in measures)}
+    if "statistics" in res:
+        res["statistics"] = results.filter_statistics(res["statistics"], measures)
     return res
 
 
 @mcp.tool()
 def run_scenarios(model: str, scenarios: list[dict[str, Any]], replications: int | None = None,
                   run_setup: dict[str, Any] | None = None, measures: list[str] | None = None,
-                  show: list[str] | None = None, timeout: float | None = None) -> dict:
+                  show: list[str] | None = None, timeout: float | None = None,
+                  per_replication: bool = False, csv_path: str | None = None) -> dict:
     """Run several what-if scenarios in one Arena session without saving. Each scenario is {"name", "changes":
     {module: {operand: value}}, "replications", "run_setup"}; e.g. [{"name": "3 doctors", "changes": {"Doctor":
     {"Capacity": "3"}}}, {"name": "4 doctors", "changes": {"Doctor": {"Capacity": "4"}}}]. Use the same number of
     replications in every scenario you compare. measures keeps only statistics whose names contain these strings.
-    timeout sets the Arena 14 polling limit in seconds for each scenario."""
-    return _guard(core.scenarios, model, scenarios, replications, run_setup, show, measures, timeout=timeout)
+    timeout sets the Arena 14 polling limit in seconds for each scenario. per_replication includes native
+    replication IDs. csv_path writes one combined CSV when every scenario succeeds."""
+    return _guard(core.scenarios, model, scenarios, replications, run_setup, show, measures, timeout=timeout,
+                  per_replication=per_replication, csv_path=csv_path)
 
 
 @mcp.tool()
-def get_results(model: str, per_replication: bool = False, include_empty: bool = False) -> dict:
-    """Statistics of the model's last run, read from its report database (.db) or text report (.out), without running
-    again. per_replication adds every replication's value."""
+def get_results(model: str, per_replication: bool = False, include_empty: bool = False,
+                measures: list[str] | None = None, csv_path: str | None = None) -> dict:
+    """Read statistics offline. Pass a DOE to select the newest readable companion report, or a .db or .out path
+    to use that exact report. per_replication adds native replication IDs and values. Set csv_path to write a
+    summary or replication CSV, and measures to filter by case-insensitive statistic name fragments."""
     try:
-        return core.last_results(model, per_replication, include_empty)
+        return results.last_results(model, per_replication, include_empty, measures=measures, csv_path=csv_path)
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
 
@@ -197,9 +202,8 @@ def screenshot_model(model: str, out_path: str | None = None, region: list[float
                      pixels_per_unit: float | None = None, view_name: str | None = None,
                      max_tiles: int = 64) -> Any:
     """Export an Arena PNG by view_name or by region [x0, y0, x1, y1]. Omit both to export the whole flowchart.
-    Without pixels_per_unit the scale is never below Arena's current zoom, so labels never come out smaller than on
-    screen: a region that fits one pane at that scale is one image, a bigger one is tiled up to max_tiles (raise it
-    for a bigger, still sharp image) and only then scaled down. Set pixels_per_unit to force a scale. For animation,
+    Without pixels_per_unit the export prefers Arena's current zoom. A larger region is tiled up to max_tiles.
+    The scale can be reduced to fit the tile count and image size limits. Set pixels_per_unit to force a scale. For animation,
     first pause with the target region visible in Arena: the paused snapshot captures one frame without changing the
     current view."""
     from .snapshot import snapshot
@@ -227,10 +231,8 @@ def capture_animation_frame(model: str, out_path: str, view_name: str, simulatio
 def capture_animation_frames(model: str, out_dir: str, view_name: str, simulation_times: list[float],
                              speed: float = 0.5, timeout: float = 120, prefix: str = "frame") -> Any:
     """Export a sequence of animation frames (Arena 14) at increasing simulation times, to check that motion,
-    the clock, queues and status text stay continuous: 5-8 key moments are more telling than many frames. Each
-    frame replays the run from zero (Arena 14 cannot resume a paused animation through COM), so the wall clock is
-    about the number of frames times the replay time; timeout is the limit for one frame. Returns the frame list
-    and the first three images."""
+    the clock, queues and status text at 5-8 key moments. Each frame replays the run from zero. Timeout is the
+    wait limit for one frame. Returns the frame list and the first three images."""
     from .snapshot import capture_animation_frames as render_frames
     res = _guard(render_frames, model, out_dir, view_name, simulation_times, speed=speed, timeout=timeout,
                  prefix=prefix)

@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -85,12 +86,26 @@ def _copy_skill(client):
         return None
     if not os.path.isdir(src):
         return None  # no bundled skill (packaging without it): the arena_guide tool still serves the text
+    if _linked_skill(dst):
+        return dst
     if os.path.isdir(dst):
         shutil.rmtree(dst)
     elif os.path.exists(dst):  # a stray file where the skill folder belongs
         os.remove(dst)
     shutil.copytree(src, dst)
     return dst
+
+
+def _linked_skill(path):
+    if not path:
+        return False
+    try:
+        attributes = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    # CC Switch 可以用 Windows junction 或符号链接同步，安装和卸载都交还给管理方。
+    return stat.S_ISLNK(attributes.st_mode) or bool(
+        getattr(attributes, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 TOML_BLOCK = re.compile(r"(?ms)^\[mcp_servers\.(?:\"arena-agent\"|arena-agent)(?:\.[^\]]*)?\]\n.*?(?=^\[(?!mcp_servers\.(?:\"arena-agent\"|arena-agent)[\].])|\Z)")
@@ -158,6 +173,8 @@ def install(clients=None):
     for c in clients or detect():
         rec = {"client": c, "mcp": MCP[c](cmd)}
         rec["skill"] = _copy_skill(c)
+        if _linked_skill(rec["skill"]):
+            rec["skill_managed_externally"] = True
         if c == "claude-desktop":
             rec["note"] = "Restart Claude Desktop. Its chat has no skill folder; the arena_guide tool serves the guide."
         else:
@@ -172,7 +189,9 @@ def uninstall(clients=None):
     for c in clients or detect():
         rec = {"client": c, "mcp": MCP[c](None, remove=True)}
         dst = skill_target(c)
-        if dst and os.path.isdir(dst):
+        if _linked_skill(dst):
+            rec["skill_managed_externally"] = True
+        elif dst and os.path.isdir(dst):
             shutil.rmtree(dst)
             rec["skill_removed"] = dst
         done.append(rec)

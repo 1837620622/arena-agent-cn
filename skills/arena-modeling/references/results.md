@@ -1,60 +1,42 @@
-# Results and output analysis
+# Arena 报表、逐次统计和方案比较
 
-## What `run_model` returns
+## 找到本轮报表
 
-`statistics` maps each statistic to `{kind, source, average, half_width, min, max, n}`:
+- `run_model` 完成后检查 `ok`、`errors`、`replications`、`end_time` 和 `results_source`。Arena 14 批跑读本轮 SIMAN `.out`，Arena 16 优先读本轮原生 SQLite `.db`。遇到 `timed_out`、`edition_limit_exceeded` 或意外提前停止，先定位原因并重新取得完整运行结果。
+- `get_results` 可离线读取报表。传 DOE 路径时，根据更新时间选择最近可读的同名报表。已知来源时直接传 `.out` 或 `.db`，再核对返回的 `source` 和 `ok`。同一个 DOE 连续运行会更新旁边的原生文件，比较旧结果时应保留各自的报表或导出表。
+- `measures=["Waiting", "Utilization"]` 按统计名片段筛选，忽略大小写。找不到要求的统计时，先取全部名称检查模型是否记录该指标以及名称是否相符。
 
-- `average`: mean over replications of the per-replication value.
-- `half_width`: 95% confidence half-width, t distribution with n - 1 degrees of freedom (as Arena's own report).
-  The interval is average +- half_width. `null` with one replication.
-- `min` / `max`: smallest and largest replication value (not the smallest single observation).
-- `n`: replications.
+## 读懂统计口径
 
-Kinds and typical names:
+| 字段或类型 | 验收时看什么 |
+| --- | --- |
+| `average`、`n` | 在跨重复汇总中，分别是有效重复结果的均值和参与汇总的重复数 |
+| `half_width` | 跨重复 95% 置信区间半宽。SQLite 汇总按重复结果使用 t 分布计算，只有一次有效重复时为空。SIMAN 保留原生表字段及口径 |
+| `min`、`max` | 跨重复汇总的最小和最大重复结果。单次文本报表的 `minimum`、`maximum` 按该表的观测口径解释 |
+| `tally` | 每次重复中对事件观测值取平均，例如 `Examination.Queue.Waiting Time` 或 `Patient.Total Time` |
+| `time-persistent` | 在一次重复内按时间加权，例如 `Examination.Queue.Number Waiting`、`Doctor.Instantaneous Utilization` 和 `Patient.WIP` |
+| `counter`、`output` | 计数器或重复结束时记录的输出，如 `System.NumberOut` 或模型定义的统计表达式 |
 
-| kind | examples | meaning |
-|---|---|---|
-| tally | `Exam.Queue.Waiting Time`, `Patient.Total Time`, `Patient.Wait Time`, `<Record tally>.Interval` | average of observations within a replication |
-| time-persistent | `Exam.Queue.Number Waiting`, `Doctor.Instantaneous Utilization`, `Doctor.Number Busy`, `Patient.WIP` | time-weighted average |
-| counter | `<Record counter>` | count per replication |
-| output | `Doctor.ScheduledUtilization`, `Patient.NumberOut`, `System.NumberOut`, Statistic outputs | value at the end of each replication |
+SIMAN 文本记录可含 `section`、`reps`、`value`、`count`、`limit`、`average` 和原生的 `(Insuf)`、`(Corr)` 等标记。SQLite 记录使用 `kind`、`source` 等字段。同名指标来自不同数据源时须分别核对。
 
-`per_replication=true` adds every replication's value (for paired comparisons, plots, or checking outliers).
-`measures=["Waiting", "Utilization"]` keeps only matching statistics. `get_results` reads the last run again without
-running.
+`per_replication=true` 返回相互对应的 `replication_ids` 和 `replications`。按报表中的实际编号配对。原始编号的缺口保留下来，有编号无观测时值为空。只有汇总表的报表可用于读汇总结果，逐次分析需取得原生重复数据。
 
-Records read from the Arena 14 text report (`<model>.out`) keep Arena's own identifiers and column names: they carry
-`section` and `reps`, and the values under `value`, `count`, `limit` or `average`, instead of `kind`/`source`. Read
-them as Arena printed them; the database records above are the uniform shape.
+## CSV 输出
 
-## Choosing run settings
+```powershell
+arena-agent results bank.out --csv bank-summary.csv --measures Waiting
+arena-agent results bank.out --per-rep --csv bank-replications.csv --measures Waiting
+arena-agent scenarios bank.doe cases.json --reps 10 --per-rep --csv comparison.csv
+```
 
-- **Terminating systems** (a clinic day, a shift): replication length = the day; no warm-up; replications = days.
-- **Steady-state questions** (long-run average of a system that never empties): long replications plus a warm-up
-  period long enough for queues to stabilise (plot a queue length over time, or compare halves of a long run); report
-  that warm-up was used.
-- **Replications**: start with 10; if a half-width is wider than ~10% of its average, or wider than the differences you
-  must detect, increase. Rough rule: n_needed ~ n * (half_width / target_half_width)^2.
-- Always set `base_time_units` and the replication length units explicitly; say which units the results are in
-  (times are in base time units).
+MCP 的 `get_results` 和 `run_scenarios` 通过 `csv_path` 指定文件名，`per_replication` 切换到逐次表。CSV 使用 UTF-8 BOM，包含报告路径、统计名称，以及适用时的场景名称和场景编号。逐次表用空单元格表示已记录的重复没有观测值。
 
-## Comparing scenarios
+场景仿真全部成功后才尝试写入合并 CSV。打开表格核对每个指定场景及目标统计都有对应行，核对编号与返回值。导出报错时查看 `error` 或 `csv_error`，确认筛选匹配、输出为 `.csv` 且目标文件可写。现有文件受占用时先解除占用，或改用新路径。
 
-`run_scenarios` with the same replications for each scenario. Two scenarios differ significantly at ~95% when their
-intervals do not overlap; overlapping intervals do not prove they are equal. For a sharper comparison use
-`per_replication=true` and compare paired differences (Arena uses the same random number streams per replication in
-each run, so replication i of two scenarios is paired): mean difference +- t * sd / sqrt(n).
+## 运行设计和合理性
 
-## Sanity checks before reporting
-
-- Utilization ~ arrival rate x mean service time / number of servers (per resource).
-- Flow: `NumberIn` ~ `NumberOut` + WIP at the end.
-- Simple queue (M/M/c): compare waiting time with the Erlang C formula; a terminating run that starts empty will show
-  less waiting than the steady-state value.
-- Utilization near 1 with growing queues means the system is unstable: say so instead of reporting a waiting time.
-- `edition_limit_exceeded` or a run that stops early (`end_time` short of the replication length) invalidates results.
-
-## Reporting
-
-State: the system and assumptions (distributions, parameters, run length, warm-up, replications), each requested
-measure as average +- half-width with units, the comparison and recommendation if asked, and the model file path.
+- 终止型系统用真实的初始状态和终止条件，例如营业班次和清空要求。稳态分析应有足够长的运行窗口，并用队列、利用率随时间的变化选择热身。说明模型的基础时间单位、运行长度、热身和重复数。
+- 按题目规定或估计精度设置重复次数。允许试跑时先拿一组有效重复估计半宽，再依目标精度增加。计算 `n × (当前半宽 / 目标半宽)²` 可以估计需要的重复数，最终以实际半宽复核。
+- 比较方案时保持指标定义、计量单位、终止条件、热身及重复次数可比。使用同一组可比随机流设计时，按真实编号配对，考察各重复的差值及其区间。独立方案按独立样本分析，各自的置信区间用于分别描述平均值。
+- 对实体数做流量平衡，将初始在制、实际进入、实际退出和终止时在制放在同一口径核对。简单固定容量队列可用到达率、平均服务时间及资源数估计利用率。符合 M/M/c 稳态假设时可与 Erlang C 对比。利用率长期接近 1 且队列持续增长时检查负荷、资源日程、热身和观测窗口。
+- 需要说明结果时，给出运行配置、实际报表来源、指定指标及其单位，以及可用的区间或逐次结果。交付格式以用户要求为准。

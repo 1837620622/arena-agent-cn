@@ -45,6 +45,10 @@ one, sets every module, declares the names they use, connects them, compiles and
 
 (The `//` comments are for reading only; real JSON has none.)
 
+Supply a distinct `save_as` when extending a model whose original file you want to keep. If only `base` is given,
+the build edits that file in place. Alternate paths to the same file, including a hard link, cannot be used as
+`save_as`. For a complete runnable model, see the bank and clinic examples in the repository.
+
 ## Fields
 
 - `panel` defaults to `BasicProcess`. Hold, Search, Remove, Delay, Seize, Release, ReadWrite, Expression, File,
