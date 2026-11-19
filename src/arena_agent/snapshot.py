@@ -14,7 +14,7 @@ import win32con
 import win32gui
 from PIL import Image, ImageGrab
 
-from .core import (ARENA_14, ArenaError, com_major_version, named_view_regions, open_model, safe,
+from .core import (ARENA_14, ArenaError, com_major_version, end_completed_runs, named_view_regions, open_model, safe,
                    temporary_settings)
 
 VIEW_SETTINGS = {"SplitScreen": True, "SplitScreenPercent": 99, "Grid": False, "ShowRulers": False,
@@ -395,6 +395,8 @@ def capture_animation_frame(a, model, out_path, view_name, simulation_time, *, s
         raise ArenaError("animation frame output must end in .png")
     if com_major_version(a.Version) != ARENA_14:
         raise ArenaError("automated animation playback currently supports Arena 14")
+    # 上一次运行可能停在运行模式（State 12/21，End() 未复位）：先结束这些已完成的运行，正在播放或暂停的模型保持原状。
+    end_completed_runs(a)
     if any(safe(lambda: a.Models.Item(i).State, 0) for i in range(1, a.Models.Count + 1)):
         raise ArenaError("an Arena run is still active; end it in Arena before starting animation playback")
 

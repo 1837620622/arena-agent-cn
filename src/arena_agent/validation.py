@@ -19,7 +19,10 @@ def validate(a, model, replications=1, png_path=None, view_name=None, pixels_per
     path = Path(model).resolve()
     if not path.is_file():
         raise core.ArenaError(f"no such model file: {path}")
-    if any(core.safe(lambda: a.Models.Item(i).State, 0) for i in range(1, a.Models.Count + 1)):
+    # 已完成的运行（State 12/21）不阻塞验收；正在运行或暂停的模型必须先结束。
+    if any(state and state not in core.COMPLETE_STATES
+           for state in (core.safe(lambda i=i: a.Models.Item(i).State, 0)
+                         for i in range(1, a.Models.Count + 1))):
         raise core.ArenaError("end the active Arena run before validating a model")
 
     m = core.open_model(a, str(path))

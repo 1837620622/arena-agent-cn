@@ -43,7 +43,8 @@ Background and evidence for each: `arena_guide("discoveries")`.
     returns without running. `run_model` closes completed runs left in run mode (`ended_first`). If a model is
     playing or paused, the tool returns its name and state without ending it. Arena 14 polls batch completion
     with a 300-second default limit, configurable through `timeout` / `--timeout`. A timed-out call requests
-    `End()` and returns no statistics for that batch.
+    `End()` and returns no statistics for that batch. The animation tools end completed runs the same way before
+    playback, so a series of frames is not stopped by the run the previous frame ended.
 13. **Simultaneous events are ordered by Arena's tie rules.** Two processes or entities scheduled at the same instant
     can swap order when an unrelated module is added, changing results. Give clocks distinct offsets (first creation
     0.505 instead of 0.5) and simultaneous entities an explicit order (`+ 0.000001 * ID`). Adding a module that "does

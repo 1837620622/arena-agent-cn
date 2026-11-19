@@ -646,6 +646,29 @@ def test_batch_checks_every_model_before_ending_completed_run():
         core.end_other_runs(app)
 
 
+def test_animation_frame_ends_a_completed_run_before_playback(monkeypatch):
+    from arena_agent import snapshot
+
+    finished = SimpleNamespace(Name="finished", State=12, End=lambda: setattr(finished, "State", 0))
+
+    def opener(*_args):
+        raise core.ArenaError("reached playback")
+
+    monkeypatch.setattr(snapshot, "open_model", opener)
+    app = SimpleNamespace(Version=1400, Models=SimpleNamespace(Count=1, Item=lambda _: finished))
+    with pytest.raises(core.ArenaError, match="reached playback"):
+        snapshot.capture_animation_frame(app, "other.doe", "frame.png", "Detail", 5)
+    assert finished.State == 0  # 上一帧结束后留下的运行模式不再挡住下一帧
+
+
+def test_close_works_when_a_model_has_no_saved_property():
+    closed = []
+    model = SimpleNamespace(FullName="m.doe", State=0, QuietMode=False, Close=lambda: closed.append("closed"))
+    app = SimpleNamespace(Models=SimpleNamespace(Count=1, Item=lambda _: model))
+    result = core.close(app)
+    assert result["ok"] and result["closed"] == ["m.doe"] and closed == ["closed"]
+
+
 def test_extension_band_stays_inside_the_arena_view():
     assert core.band_origin((-5000, -5000, 5000, 9000), 2600, 1800) == [-5000, 10800]
     assert core.band_origin((0, 0, 20000, 31000), 2600, 1800) == [22600, 0]  # below would be out of view
