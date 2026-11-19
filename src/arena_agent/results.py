@@ -279,27 +279,26 @@ SUMMARY_FIELDS = ("average", "half_width", "min", "max", "n", "value", "count", 
 CONTEXT_FIELDS = ("scenario_index", "scenario", "statistic", "kind", "statistic_source", "report")
 
 
-def _csv_rows(reports, per_replication):
-    for index, report in enumerate(reports, 1):
-        for name, stat in report["statistics"].items():
-            context = {
-                "scenario_index": index if "name" in report else None,
-                "scenario": report.get("name"),
-                "statistic": name,
-                "kind": stat.get("kind", stat.get("section")),
-                "statistic_source": stat.get("source"),
-                "report": report.get("results_source", report.get("source")),
-            }
-            if per_replication:
-                ids = stat.get("replication_ids", [])
-                for rep, value in zip(ids, stat.get("replications", [])):
-                    yield {**context, "replication": rep, "value": value}
-            else:
-                row = {key: stat.get(key) for key in SUMMARY_FIELDS}
-                row["n"] = stat.get("n", stat.get("reps"))
-                row["min"] = stat.get("min", stat.get("minimum"))
-                row["max"] = stat.get("max", stat.get("maximum"))
-                yield {**context, **row}
+def _csv_rows(report, per_replication, index):
+    for name, stat in report["statistics"].items():
+        context = {
+            "scenario_index": index if "name" in report else None,
+            "scenario": report.get("name"),
+            "statistic": name,
+            "kind": stat.get("kind", stat.get("section")),
+            "statistic_source": stat.get("source"),
+            "report": report.get("results_source", report.get("source")),
+        }
+        if per_replication:
+            ids = stat.get("replication_ids", [])
+            for rep, value in zip(ids, stat.get("replications", [])):
+                yield {**context, "replication": rep, "value": value}
+        else:
+            row = {key: stat.get(key) for key in SUMMARY_FIELDS}
+            row["n"] = stat.get("n", stat.get("reps"))
+            row["min"] = stat.get("min", stat.get("minimum"))
+            row["max"] = stat.get("max", stat.get("maximum"))
+            yield {**context, **row}
 
 
 def _csv_cell(value):
@@ -313,11 +312,17 @@ def _csv_cell(value):
 def write_csv(path, reports, per_replication=False):
     """Write a summary or a long replication table, preserving an existing CSV until the replacement is complete."""
     out = csv_destination(path)
-    rows = _csv_rows(reports, per_replication)
-    first = next(rows, None)
-    if first is None:
-        what = "replication values" if per_replication else "statistics"
-        raise ValueError(f"no matching {what} to export")
+    sections = []
+    for index, report in enumerate(reports, 1):
+        rows = _csv_rows(report, per_replication, index)
+        first = next(rows, None)
+        if first is None:
+            what = "replication values" if per_replication else "statistics"
+            case = f" in scenario {index} ({report['name']!r})" if "name" in report else ""
+            raise ValueError(f"no matching {what}{case} to export")
+        sections.append(chain((first,), rows))
+    if not sections:
+        raise ValueError("no reports to export")
     header = CONTEXT_FIELDS + (("replication", "value") if per_replication else SUMMARY_FIELDS)
     out.parent.mkdir(parents=True, exist_ok=True)
     staged = None
@@ -327,7 +332,7 @@ def write_csv(path, reports, per_replication=False):
             staged = Path(stream.name)
             writer = csv.DictWriter(stream, fieldnames=header)
             writer.writeheader()
-            for count, row in enumerate(chain((first,), rows), 1):
+            for count, row in enumerate(chain.from_iterable(sections), 1):
                 writer.writerow({k: _csv_cell(v) for k, v in row.items()})
         os.replace(staged, out)
     finally:

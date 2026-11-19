@@ -28,6 +28,9 @@ CLSID_KEY = r"Arena.Application\CLSID"
 ARENA_14 = 14
 COMPATIBILITY_MODES = {ARENA_14: "arena14", 16: "arena16"}
 DEFAULT_BATCH_TIMEOUT = 300
+# smStateRunComplete / smStatePlaybackRunComplete: the run is over and only Arena's run mode is left, so End() is
+# safe. Every other non-zero state is a run the user started (or a pause) and must be left alone.
+COMPLETE_STATES = {12, 21}
 
 # Friendly exit names -> exit operand. Arena's exit points are hidden operands (see BasicProcess.txt /
 # AdvancedProcess.txt in the Arena folder).
@@ -1000,10 +1003,11 @@ def close(a, models=None, *, save_changes=False):
         if not want or full.lower() in want:
             name = full
             try:
-                if m.State:
+                if safe(lambda: m.State, 0):
                     failed.append({"model": name, "error": "end the active run in Arena before closing"})
                     continue
-                if not m.Saved:
+                # 个别版本没有 Saved 属性：读不到就按已保存处理，保持原来的关闭行为。
+                if not safe(lambda: m.Saved, True):
                     if not save_changes:
                         failed.append({"model": name, "error": "unsaved changes; save or discard them in Arena first"})
                         continue
@@ -1190,23 +1194,30 @@ def evaluate(m, expr):
     return "ERR cannot evaluate"
 
 
-def end_other_runs(a):
-    """清理已完成但仍在运行模式的模型。保留用户正在运行或暂停的模型。"""
-    stale = []
+def end_completed_runs(a):
+    """End models whose run has finished but are still in run mode (a stall for the next Go). Never touches a run that
+    is playing or paused. Returns the names ended."""
+    ended = []
     for i in range(1, a.Models.Count + 1):
         model = a.Models.Item(i)
-        state = model.State
-        if state in (12, 21):  # smStateRunComplete / smStatePlaybackRunComplete
-            stale.append(model)
-        elif state:
-            raise ArenaError(f"Arena model {model.Name!r} is active (state {state}); end the run before starting a batch")
-    ended = []
-    for model in stale:
+        if model.State not in COMPLETE_STATES:
+            continue
         model.End()
         if model.State:
             raise ArenaError(f"Arena model {model.Name!r} is still in run mode after End()")
         ended.append(model.Name)
     return ended
+
+
+def end_other_runs(a, *, operation="a batch"):
+    """清理已完成但仍在运行模式的模型。保留用户正在运行或暂停的模型。"""
+    for i in range(1, a.Models.Count + 1):
+        model = a.Models.Item(i)
+        state = model.State
+        if state and state not in COMPLETE_STATES:
+            raise ArenaError(f"Arena model {model.Name!r} is active (state {state}); "
+                             f"end the run before starting {operation}")
+    return end_completed_runs(a)
 
 
 def _run_once(a, m, show, outputs, per_replication=False, *, ended_first=(), timeout=None):

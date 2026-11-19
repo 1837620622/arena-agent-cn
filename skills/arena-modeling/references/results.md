@@ -31,7 +31,7 @@ arena-agent scenarios bank.doe cases.json --reps 10 --per-rep --csv comparison.c
 
 MCP 的 `get_results` 和 `run_scenarios` 通过 `csv_path` 指定文件名，`per_replication` 切换到逐次表。CSV 使用 UTF-8 BOM，包含报告路径、统计名称，以及适用时的场景名称和场景编号。逐次表用空单元格表示已记录的重复没有观测值。
 
-场景仿真全部成功后才尝试写入合并 CSV。打开表格核对每个指定场景及目标统计都有对应行，核对编号与返回值。导出报错时查看 `error` 或 `csv_error`，确认筛选匹配、输出为 `.csv` 且目标文件可写。现有文件受占用时先解除占用，或改用新路径。
+场景仿真全部成功且每组都有匹配行后才写入合并 CSV。某个场景没有匹配行时，`csv_error` 会指出场景编号与名称，已有 CSV 可以继续使用。打开表格核对所需的场景、统计和重复编号。导出报错时检查筛选条件、`.csv` 后缀及目标文件是否受占用。
 
 ## 运行设计和合理性
 

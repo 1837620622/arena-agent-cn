@@ -19,9 +19,8 @@ def validate(a, model, replications=1, png_path=None, view_name=None, pixels_per
     path = Path(model).resolve()
     if not path.is_file():
         raise core.ArenaError(f"no such model file: {path}")
-    if any(core.safe(lambda: a.Models.Item(i).State, 0) for i in range(1, a.Models.Count + 1)):
-        raise core.ArenaError("end the active Arena run before validating a model")
-
+    # Arena 14 在完成态仍保留运行模式，原生 Check 前必须退出该状态。
+    core.end_other_runs(a, operation="validation")
     m = core.open_model(a, str(path))
     if view_name is not None and view_name not in core.named_view_regions(m):
         raise core.ArenaError(f"unknown named view {view_name!r}; list the model views first")

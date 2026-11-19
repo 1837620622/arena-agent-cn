@@ -46,6 +46,26 @@ def test_validate_runs_native_model_without_saving_it(tmp_path):
         {"name": "By ID", "modules": ["arrive", "exam"], "margin": 600},
     ])
     assert built["ok"], built
+
+    def validate_after_completed_run(app):
+        if core.com_major_version(app.Version) != 14:
+            return validation.validate(app, model, 2)
+        m = core.open_model(app, model)
+        with core.temporary_settings(m, BatchMode=True, QuietMode=True, DisableReportDatabase=True,
+                                     DisplayDefaultReport=1, NumberOfReplications=1):
+            try:
+                m.Go(2)
+                deadline = time.monotonic() + 15
+                while m.State != 12 and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                assert m.State == 12
+                result = validation.validate(app, model, 2)
+                assert m.State == 0
+                return result
+            finally:
+                if m.State:
+                    m.End()
+
     try:
         saved = (tmp_path / "clinic.doe").read_bytes()
         views = worker.call(core.list_named_views, model)["views"]
@@ -56,7 +76,7 @@ def test_validate_runs_native_model_without_saving_it(tmp_path):
         bad = worker.call(core.setup, model, {"replications": 2, "typo_field": 45})
         assert not bad["ok"] and not bad["saved"] and bad["run_setup"] == initial
         assert (tmp_path / "clinic.doe").read_bytes() == saved
-        result = worker.call(validation.validate, model, 2)
+        result = worker.call(validate_after_completed_run)
         assert result["ok"] and result["model_file_unchanged"], result
         assert result["run"]["replications"] == 2 and result["run"]["end_time"] == 480
         assert result["run"]["statistics_count"] > 0

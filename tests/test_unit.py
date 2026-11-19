@@ -215,6 +215,25 @@ def test_failed_scenarios_retain_previous_csv(tmp_path, monkeypatch):
     assert path.read_bytes() == b"existing"
 
 
+@pytest.mark.parametrize("per_replication", [False, True])
+def test_csv_export_rejects_missing_scenario_rows(tmp_path, monkeypatch, per_replication):
+    path = tmp_path / "comparison.csv"
+    path.write_bytes(b"existing")
+
+    def run(_app, _model, *, changes, **_options):
+        stats = {"Done": {"replication_ids": [1], "replications": [12]}}
+        if not changes:
+            stats = {"Done": {"average": 15}} if per_replication else {"Other": {"value": 15}}
+        return {"ok": True, "statistics": stats}
+
+    monkeypatch.setattr(core, "run", run)
+    cases = [{"name": "方案一", "changes": {"A": {}}}, {"name": "方案二"}]
+    result = core.scenarios(None, "m.doe", cases, measures=["Done"], per_replication=per_replication, csv_path=path)
+    assert not result["ok"] and all(case["ok"] for case in result["scenarios"])
+    assert "scenario 2 ('方案二')" in result["csv_error"] and "csv" not in result
+    assert path.read_bytes() == b"existing"
+
+
 def test_plan_layout_survives_a_bad_layout_block():
     spec = {"modules": [{"id": "a"}, {"id": "b"}], "connections": [{"from": "a", "to": "b"}],
             "layout": {"dx": "wide"}}
@@ -260,9 +279,10 @@ def test_paused_crop_tracks_a_nonzero_origin_on_mirrored_axes(monkeypatch, bound
 def test_animation_frame_keeps_existing_run_active():
     from arena_agent import snapshot
 
+    finished = SimpleNamespace(Name="finished", State=12, End=lambda: pytest.fail("finished run was changed"))
     model = SimpleNamespace(Name="live", State=13, End=lambda: pytest.fail("existing run was ended"))
-    app = SimpleNamespace(Version=1400, Models=SimpleNamespace(Count=1, Item=lambda _: model))
-    with pytest.raises(core.ArenaError, match="still active"):
+    app = SimpleNamespace(Version=1400, Models=SimpleNamespace(Count=2, Item=lambda i: [finished, model][i - 1]))
+    with pytest.raises(core.ArenaError, match="is active"):
         snapshot.capture_animation_frame(app, "other.doe", "frame.png", "Detail", 5)
 
 
@@ -819,6 +839,29 @@ def test_batch_checks_every_model_before_ending_completed_run():
     app = SimpleNamespace(Models=SimpleNamespace(Count=2, Item=lambda i: [finished, paused][i-1]))
     with pytest.raises(core.ArenaError, match="paused"):
         core.end_other_runs(app)
+
+
+def test_animation_frame_ends_a_completed_run_before_playback(monkeypatch):
+    from arena_agent import snapshot
+
+    finished = SimpleNamespace(Name="finished", State=12, End=lambda: setattr(finished, "State", 0))
+
+    def opener(*_args):
+        raise core.ArenaError("reached playback")
+
+    monkeypatch.setattr(snapshot, "open_model", opener)
+    app = SimpleNamespace(Version=1400, Models=SimpleNamespace(Count=1, Item=lambda _: finished))
+    with pytest.raises(core.ArenaError, match="reached playback"):
+        snapshot.capture_animation_frame(app, "other.doe", "frame.png", "Detail", 5)
+    assert finished.State == 0  # 上一帧结束后留下的运行模式不再挡住下一帧
+
+
+def test_close_works_when_a_model_has_no_saved_property():
+    closed = []
+    model = SimpleNamespace(FullName="m.doe", State=0, QuietMode=False, Close=lambda: closed.append("closed"))
+    app = SimpleNamespace(Models=SimpleNamespace(Count=1, Item=lambda _: model))
+    result = core.close(app)
+    assert result["ok"] and result["closed"] == ["m.doe"] and closed == ["closed"]
 
 
 def test_extension_band_stays_inside_the_arena_view():

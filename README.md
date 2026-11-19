@@ -4,6 +4,13 @@
 
 [安装和更新](#安装和更新) · [运行自带示例](#示例和验收) · [方案对比](#方案对比) · [读取报表与导出 CSV](#读取报表与导出-csv) · [命令速查](#cli-与-mcp-命令速查) · [动画和排版](#二维动画及导图) · [排查与验证](#验证边界与常见问题)
 
+## v0.2.11 更新
+
+- Arena 14 清理已完成的运行后再验收或采帧，保留正在播放或暂停的运行。早时刻采帧先设断点，再开始播放。
+- CLI 和 MCP 支持按指标导出汇总或逐次 CSV。逐次表保留原生重复编号。任一方案缺少匹配数据时，指出对应方案并保留已有 CSV。
+- 命名视图支持模块 ID 和模块名称。运行设置遇到无效输入时取消写入，临时运行结束后核对参数恢复情况。
+- 中文技能可按任务读取配置、报表、排版、动画和交付复验指南。 [版本说明与下载](https://github.com/1837620622/arena-agent-cn/releases/tag/v0.2.11)
+
 ## 已实现的功能
 
 | 功能 | 当前实现 | 可检查的结果 |
@@ -55,6 +62,15 @@ arena-agent doctor
 
 脚本默认从 GitHub 的 `main` 安装。需固定到某个已发布版本时，把 `ARENA_AGENT_SOURCE` 设为该版本的 GitHub 源码 ZIP 地址再运行。此变量也支持本地仓库目录，适用于开发验证。 [已发布版本](https://github.com/1837620622/arena-agent-cn/releases)
 
+例如将已有后端固定到 `v0.2.11`。
+
+```powershell
+$env:ARENA_AGENT_SOURCE = 'https://github.com/1837620622/arena-agent-cn/archive/refs/tags/v0.2.11.zip'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -UpdateOnly
+Remove-Item Env:ARENA_AGENT_SOURCE
+arena-agent --version
+```
+
 Claude Code 插件入口是 `/plugin marketplace add 1837620622/arena-agent-cn`，添加后运行 `/plugin install arena-agent`。
 
 ### CC Switch 安装技能
@@ -104,7 +120,7 @@ Arena 14 的批跑默认等待 300 秒。长任务可以用 `arena-agent run ban
 
 `arena-agent close model.doe` 和 MCP 的 `close_models` 默认只关闭空闲、已保存的模型。Arena 将文档标记为已修改时，可回到界面决定保存或放弃。要明确保存一个已命名的模型并关闭，可用 `arena-agent close model.doe --save`，或在 MCP 传入 `save_changes: true`。
 
-命令行成功返回 0。工具报告操作失败、找不到可读报表或导出失败时返回 1。命令行参数或用法解析失败时返回 2。自动化脚本可在每一步检查 `$LASTEXITCODE`。
+自动化脚本可按 `$LASTEXITCODE` 判断结果。0 表示成功，1 表示操作失败（如 `error`、`ok: false`、没有可读报表或导出失败），2 表示命令行参数或用法无法解析。
 
 ### 方案对比
 
@@ -121,7 +137,7 @@ Arena 14 的批跑默认等待 300 秒。长任务可以用 `arena-agent run ban
 arena-agent scenarios bank.doe cases.json --reps 10 --per-rep --csv teller-replications.csv --measures 'Teller Service.Queue.Waiting'
 ```
 
-对应的 MCP 工具是 `run_scenarios`。把 JSON 数组作为 `scenarios`，同时传入模型绝对路径、`replications: 10`、`per_replication: true`、`measures` 和 `csv_path`。逐组结果保存在返回值的 `scenarios` 中。CSV 在所有方案成功后写出，失败时可在 `scenarios` 中查看具体错误。如果重复利用同一个 DOE 路径，旁边的原生报表会随运行更新，因此请用本次返回值或 CSV 做多方案比较。
+对应的 MCP 工具是 `run_scenarios`。把 JSON 数组作为 `scenarios`，同时传入模型绝对路径、`replications: 10`、`per_replication: true`、`measures` 和 `csv_path`。逐组结果保存在返回值的 `scenarios` 中。各方案运行成功且均产生匹配行后才写出 CSV。缺少统计或逐次数据时，`csv_error` 给出对应方案，已有 CSV 可以继续使用。同一 DOE 旁的原生报表会随运行更新，多方案比较使用本次返回值或 CSV。
 
 ### 读取报表与导出 CSV
 
@@ -224,7 +240,7 @@ MCP 的同一操作接受下列参数。
 - **位置**：没有写 `x`、`y` 的模块按连接图排布——跟着上游模块向右一列，分支上下居中，长链折行成带；`layout` 可调 `dx`、`dy`、`columns`、`origin`（缺省 2600 x 1800，12 列一带）。排布结果会整体收进 ±32,000 的视图范围，压缩时在 `warnings` 里说明；显式坐标优先，但仍受同一范围限制。数据模块（资源、变量、队列、实体等）不进流程图，与自动声明的属性、变量、队列、资源和实体类型一起按 6 列网格从 `declare_at` 排开，不会叠成一团，也不会夹在流程模块之间。
 - **字号层级**：`shapes` 的 `level` 提供三级：`title`（700 模型单位）、`section`（480，缺省）、`note`（320），`height` 可覆盖；`font`、`angle`、`italic`、`underline`、`bold` 直传 Arena。同一张图只用一种字体（Arial 或 Segoe UI）和一套层级，标题、区域名、注释不要混用字号。
 - **命名视图**：`views` 按业务区域保存视图，给 `modules` 就按真实模块边界加 `margin` 计算，给 `region` 就用给定矩形。导图按视图名导出，分区图与整图都能对上同一块区域。
-- **导图比例**取决于 Arena 当前视野、分块上限和图像尺寸上限。缺省区域覆盖流程图模块和附近 5,000 单位内的图形与文字，仅有声明时则覆盖数据模块。导图前把 Arena 缩放到所需清晰度，导图后检查返回的 `pixels_per_unit`。如需精确比例，显式指定 `pixels_per_unit`。超出块数上限、单张 1.2 亿像素或边长 30,000 像素时会报错。缩小用 LANCZOS，放大用 BICUBIC。
+- **导图比例**取决于 Arena 当前视野、分块上限和图像尺寸上限。缺省区域覆盖流程图模块和附近 5,000 单位内的图形与文字，仅有声明时则覆盖数据模块。导图前把 Arena 缩放到所需清晰度，导图后检查返回的 `pixels_per_unit`。缺省比例在块数和单张 1.2 亿像素、边长 30,000 像素的上限内自动降档；显式指定 `pixels_per_unit` 时则严格照办，超出上限会直接报错。缩小用 LANCZOS，放大用 BICUBIC。
 - **核对**：按最终观看尺寸逐张看 PNG，检查标签、单位、遮挡、边缘和拼接处；区域截面上的跨区连线要能通过相邻视图或整图追踪。原生对话框截短长表达式时，在截图旁补充从模型读回的完整字段。
 
 ## 验证边界与常见问题

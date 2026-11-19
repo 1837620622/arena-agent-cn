@@ -174,7 +174,7 @@ def run_scenarios(model: str, scenarios: list[dict[str, Any]], replications: int
     {"Capacity": "3"}}}, {"name": "4 doctors", "changes": {"Doctor": {"Capacity": "4"}}}]. Use the same number of
     replications in every scenario you compare. measures keeps only statistics whose names contain these strings.
     timeout sets the Arena 14 polling limit in seconds for each scenario. per_replication includes native
-    replication IDs. csv_path writes one combined CSV when every scenario succeeds."""
+    replication IDs. csv_path writes one combined CSV when every scenario succeeds and has matching rows."""
     return _guard(core.scenarios, model, scenarios, replications, run_setup, show, measures, timeout=timeout,
                   per_replication=per_replication, csv_path=csv_path)
 

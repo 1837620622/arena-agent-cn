@@ -27,7 +27,7 @@ Exit codes: 0 success, 1 the result reports an error or ok: false, 2 a bad argum
   arena-agent views model.doe                   # list named views
   arena-agent screenshot model.doe out.png [--view NAME | --region X0 Y0 X1 Y1] [--ppu P] [--tiles N]
   arena-agent animation-frame model.doe out.png --view NAME --time T [--speed S] [--timeout SECONDS]
-  arena-agent animation-frames model.doe out_dir --view NAME --time T [T ...] [--speed S] [--prefix P]
+  arena-agent animation-frames model.doe out_dir --view NAME --time T [T ...] [--speed S] [--timeout SECONDS] [--prefix P]
   arena-agent validate model.doe [--reps N] [--png out.png] [--view NAME] [--ppu P] [--timeout SECONDS]
   arena-agent close  [model.doe ...] [--save]
 """
